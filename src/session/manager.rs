@@ -37,11 +37,17 @@ impl SessionManager {
         &self.resurrectable_sessions
     }
 
-    /// Execute a session action
-    pub fn execute_action(&mut self, action: SessionAction) {
+    /// Execute a session action.
+    ///
+    /// `Switch` is infallible. `Kill` is now a synchronous confirmation from the
+    /// Zellij host (as of zellij-tile 0.44): killing a live session waits for it
+    /// to acknowledge, and deleting a resurrectable session reports whether its
+    /// cache directory was removed. Any failure message is propagated to the caller.
+    pub fn execute_action(&mut self, action: SessionAction) -> Result<(), String> {
         match action {
             SessionAction::Switch(name) => {
                 switch_session(Some(&name));
+                Ok(())
             }
             SessionAction::Kill(name) => {
                 if self
@@ -50,10 +56,10 @@ impl SessionManager {
                     .any(|(session_name, _)| session_name == &name)
                 {
                     // If the session is resurrectable, we should delete it
-                    delete_dead_session(&name);
+                    delete_dead_session(&name)
                 } else {
                     // Otherwise, we need to kill the session
-                    kill_sessions(&[&name]);
+                    kill_sessions(&[&name])
                 }
             }
         }
@@ -64,10 +70,12 @@ impl SessionManager {
         self.pending_deletion = Some(session_name);
     }
 
-    /// Confirm session deletion
-    pub fn confirm_deletion(&mut self) {
+    /// Confirm session deletion, returning any failure reported by the host
+    pub fn confirm_deletion(&mut self) -> Result<(), String> {
         if let Some(session_name) = self.pending_deletion.take() {
-            self.execute_action(SessionAction::Kill(session_name));
+            self.execute_action(SessionAction::Kill(session_name))
+        } else {
+            Ok(())
         }
     }
 

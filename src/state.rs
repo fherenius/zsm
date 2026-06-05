@@ -386,7 +386,9 @@ impl PluginState {
     fn handle_deletion_confirmation(&mut self, key: KeyWithModifier, _session_name: &str) -> bool {
         match key.bare_key {
             BareKey::Char('y') | BareKey::Char('Y') if key.has_no_modifiers() => {
-                self.session_manager.confirm_deletion();
+                if let Err(e) = self.session_manager.confirm_deletion() {
+                    self.set_error(format!("Failed to delete session: {}", e));
+                }
                 true
             }
             BareKey::Char('n') | BareKey::Char('N') | BareKey::Esc if key.has_no_modifiers() => {
@@ -454,8 +456,9 @@ impl PluginState {
 
         if let Some((is_session, name, path)) = selected_item_data {
             if is_session {
-                // Switch to existing session
-                self.session_manager
+                // Switch to existing session (infallible)
+                let _ = self
+                    .session_manager
                     .execute_action(SessionAction::Switch(name));
                 hide_self();
             } else {
