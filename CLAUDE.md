@@ -89,3 +89,5 @@ Commit messages **must** follow Conventional Commits (they drive the changelog a
 - `fix:` → patch, `feat:` → minor (pre-1.0: `bump-minor-pre-major` is on, so `feat` bumps minor and `fix` does not bump). `!` suffix → major.
 - Other types (`docs`, `refactor`, `ci`, `chore`, `perf`, `style`, `build`, `revert`) are categorized in the changelog (`.release-please-config.json`).
 - An optional scope describes the affected area, e.g. `feat(config): ...`, `fix(naming): ...`, `fix(ui): ...`. Do not add `Co-Authored-By` lines.
+
+**Workflow:** Always `git commit` after each step of work. **NEVER `git push`** — pushing is done manually by the maintainer.
