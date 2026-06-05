@@ -317,8 +317,9 @@ impl PluginState {
                 false
             }
             BareKey::Char('r') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
-                // reload zoxide directories
+                // reload zoxide directories and re-pull the session list
                 self.fetch_zoxide_directories();
+                self.fetch_sessions();
                 true
             }
             _ => false,

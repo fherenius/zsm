@@ -54,6 +54,10 @@ impl ZellijPlugin for PluginState {
                     PermissionStatus::Granted => {
                         // Now that we have permissions, fetch zoxide directories
                         self.fetch_zoxide_directories();
+                        // Pull the full session list. The passive SessionUpdate event
+                        // only ever carries the current session until a plugin actively
+                        // requests the list (Zellij 0.44 API model), so we must pull it.
+                        self.fetch_sessions();
                         should_render = true;
                     }
                     PermissionStatus::Denied => {
@@ -88,8 +92,10 @@ impl ZellijPlugin for PluginState {
             }
             Event::Visible(true) => {
                 // Plugin was (re)opened or focused - refresh the zoxide list so it
-                // reflects directories visited since it was last shown.
+                // reflects directories visited since it was last shown, and re-pull
+                // the session list (it may have changed while we were hidden).
                 self.fetch_zoxide_directories();
+                self.fetch_sessions();
                 should_render = true;
             }
             _ => (),
@@ -156,6 +162,25 @@ impl PluginState {
         let mut context = BTreeMap::new();
         context.insert("zoxide_query".to_string(), "true".to_string());
         run_command(&["zoxide", "query", "-l", "-s"], context);
+    }
+
+    /// Pull the full session list directly from Zellij via `get_session_list()`.
+    ///
+    /// Zellij only refreshes the server-side peer-session cache (the source of the
+    /// `SessionUpdate` event) when a plugin actively calls `get_session_list()`.
+    /// Subscribing to `SessionUpdate` alone yields only the current session, so we
+    /// pull the list explicitly (this also primes the cache, so subsequent
+    /// `SessionUpdate` events become complete). Mirrors the built-in session-manager.
+    fn fetch_sessions(&mut self) {
+        match get_session_list() {
+            Ok(snapshot) => {
+                self.update_sessions(snapshot.live_sessions);
+                self.update_resurrectable_sessions(snapshot.resurrectable_sessions);
+            }
+            Err(e) => {
+                eprintln!("[zsm] get_session_list failed: {}", e);
+            }
+        }
     }
 
     fn process_zoxide_output(&mut self, output: &str) {
@@ -352,7 +377,7 @@ impl PluginState {
 
     fn normalize_path(&self, path: &str) -> String {
         let base_paths = &self.config().base_paths;
-        
+
         // If no base paths configured, return the original path
         if base_paths.is_empty() {
             return path.to_string();
@@ -361,15 +386,17 @@ impl PluginState {
         // Find the longest matching base path
         let mut longest_match: Option<&String> = None;
         let mut longest_match_len = 0;
-        
+
         for base_path in base_paths {
             // Normalize base path (remove trailing slash)
             let normalized_base = base_path.trim_end_matches('/');
-            
+
             // Check if path starts with this base path
             if path.starts_with(normalized_base) {
                 // Make sure it's a directory boundary (not partial match)
-                if path.len() == normalized_base.len() || path.chars().nth(normalized_base.len()) == Some('/') {
+                if path.len() == normalized_base.len()
+                    || path.chars().nth(normalized_base.len()) == Some('/')
+                {
                     if normalized_base.len() > longest_match_len {
                         longest_match = Some(base_path);
                         longest_match_len = normalized_base.len();
@@ -377,15 +404,15 @@ impl PluginState {
                 }
             }
         }
-        
+
         if let Some(base_path) = longest_match {
             let normalized_base = base_path.trim_end_matches('/');
-            
+
             // If path exactly matches the base path, keep the full path
             if path == normalized_base {
                 return path.to_string();
             }
-            
+
             // Strip the base path and the following slash
             if let Some(stripped) = path.strip_prefix(normalized_base) {
                 let stripped = stripped.strip_prefix('/').unwrap_or(stripped);
@@ -394,14 +421,17 @@ impl PluginState {
                 }
             }
         }
-        
+
         path.to_string()
     }
 
     fn apply_smart_truncation(&self, segments: &[&str], min_segments: usize) -> String {
         let separator = &self.config().session_separator;
         let max_length = 29;
-        eprintln!("Applying smart truncation for segments: {:?} with min_segments: {}", segments, min_segments);
+        eprintln!(
+            "Applying smart truncation for segments: {:?} with min_segments: {}",
+            segments, min_segments
+        );
 
         // Start with minimum required segments from the right
         let mut result_segments: Vec<String> = segments
@@ -428,7 +458,11 @@ impl PluginState {
 
             // If still too long with just one segment, truncate it
             if current_length > max_length && result_segments.len() == 1 {
-                let sep_len = if result_segments.len() > 1 { separator.len() } else { 0 };
+                let sep_len = if result_segments.len() > 1 {
+                    separator.len()
+                } else {
+                    0
+                };
                 let available = max_length.saturating_sub(sep_len);
                 result_segments[0].truncate(available);
                 current_length = result_segments.join(separator).len();
