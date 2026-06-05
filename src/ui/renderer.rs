@@ -232,7 +232,14 @@ impl PluginRenderer {
                 is_current,
             } => {
                 let prefix = if *is_current { "● " } else { "○ " };
-                let display_text = format!("{}{} ({})", prefix, name, directory);
+                // Sessions with no matching zoxide directory (random auto-names,
+                // cwd not in zoxide, names from an old base_paths scheme) have an
+                // empty directory — drop the "()" rather than render it empty.
+                let display_text = if directory.is_empty() {
+                    format!("{}{}", prefix, name)
+                } else {
+                    format!("{}{} ({})", prefix, name, directory)
+                };
 
                 let truncated_text = Self::get_truncated_text(&display_text, max_width);
 

@@ -150,40 +150,38 @@ impl PluginState {
     fn combined_items(&self) -> Vec<SessionItem> {
         let mut items = Vec::new();
 
-        // First, add existing sessions that match zoxide directories (including incremented ones)
+        // Show every live Zellij session. A zoxide directory is matched only to
+        // decorate the entry with its path (by generated/incremented name) — it
+        // never gates visibility. Gating on a match would silently hide sessions
+        // with random auto-names, sessions whose cwd isn't in zoxide, and sessions
+        // created under a different `base_paths` config, leaving no way to switch
+        // to or kill them.
         for session in self.session_manager.sessions() {
-            // Check if this session name matches any generated session name from zoxide directories
-            for zoxide_dir in &self.zoxide_directories {
-                // Match exact name or incremented names (e.g., "project" matches "project.2", "project.3", etc.)
-                if session.name == zoxide_dir.session_name
-                    || self.is_incremented_session(&session.name, &zoxide_dir.session_name)
-                {
-                    items.push(SessionItem::ExistingSession {
-                        name: session.name.clone(),
-                        directory: zoxide_dir.directory.clone(),
-                        is_current: session.is_current_session,
-                    });
-                    break;
-                }
-            }
+            let directory = self
+                .zoxide_directories
+                .iter()
+                .find(|zoxide_dir| {
+                    session.name == zoxide_dir.session_name
+                        || self.is_incremented_session(&session.name, &zoxide_dir.session_name)
+                })
+                .map(|zoxide_dir| zoxide_dir.directory.clone())
+                .unwrap_or_default();
+
+            items.push(SessionItem::ExistingSession {
+                name: session.name.clone(),
+                directory,
+                is_current: session.is_current_session,
+            });
         }
 
-        // Add resurrectable sessions if configured to show them
+        // Add all resurrectable sessions if configured to show them — again
+        // regardless of whether they map to a zoxide directory.
         if self.config.show_resurrectable_sessions {
             for (name, duration) in self.session_manager.resurrectable_sessions() {
-                // Check if this session name matches any generated session name from zoxide directories
-                for zoxide_dir in &self.zoxide_directories {
-                    // Match exact name or incremented names (e.g., "project" matches "project.2", "project.3", etc.)
-                    if name == &zoxide_dir.session_name
-                        || self.is_incremented_session(name, &zoxide_dir.session_name)
-                    {
-                        items.push(SessionItem::ResurrectableSession {
-                            name: name.clone(),
-                            duration: duration.clone(),
-                        });
-                        break;
-                    }
-                }
+                items.push(SessionItem::ResurrectableSession {
+                    name: name.clone(),
+                    duration: *duration,
+                });
             }
         }
 
