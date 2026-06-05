@@ -30,6 +30,8 @@ impl ZellijPlugin for PluginState {
             EventType::Key,
             EventType::RunCommandResult,
             EventType::PermissionRequestResult,
+            // Re-fetch zoxide directories whenever the plugin is reopened/focused
+            EventType::Visible,
         ]);
 
         // Don't fetch zoxide directories immediately - wait for permissions
@@ -83,6 +85,12 @@ impl ZellijPlugin for PluginState {
                         should_render = true;
                     }
                 }
+            }
+            Event::Visible(true) => {
+                // Plugin was (re)opened or focused - refresh the zoxide list so it
+                // reflects directories visited since it was last shown.
+                self.fetch_zoxide_directories();
+                should_render = true;
             }
             _ => (),
         }
