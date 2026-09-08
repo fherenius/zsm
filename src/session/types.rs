@@ -24,6 +24,41 @@ impl SessionItem {
     pub fn is_resurrectable_session(&self) -> bool {
         matches!(self, SessionItem::ResurrectableSession { .. })
     }
+
+    /// The row text for this item, before it is shortened to fit the pane.
+    ///
+    /// Both the renderer and the search engine go through this, so fuzzy match
+    /// indices always address the string that is actually drawn. Keeping two
+    /// copies of this formatting previously let them drift apart.
+    pub fn display_text(&self) -> String {
+        match self {
+            SessionItem::ExistingSession {
+                name,
+                directory,
+                is_current,
+            } => {
+                let prefix = if *is_current {
+                    "\u{25cf} "
+                } else {
+                    "\u{25cb} "
+                };
+                // Sessions with no matching zoxide directory (random auto-names,
+                // cwd not in zoxide, names from an old base_paths scheme) have an
+                // empty directory - drop the "()" rather than render it empty.
+                if directory.is_empty() {
+                    format!("{}{}", prefix, name)
+                } else {
+                    format!("{}{} ({})", prefix, name, directory)
+                }
+            }
+            SessionItem::ResurrectableSession { name, duration } => format!(
+                "\u{21ba} {} (created {} ago)",
+                name,
+                humantime::format_duration(*duration)
+            ),
+            SessionItem::Directory { path, .. } => path.clone(),
+        }
+    }
 }
 
 /// Actions that can be performed on sessions

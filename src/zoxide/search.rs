@@ -131,10 +131,10 @@ impl SearchEngine {
         let mut matches = Vec::new();
 
         for item in items {
-            // Create the display text that will actually be shown
-            let display_text = Self::get_display_text_for_search(item);
+            // Match against the same text the renderer draws, so the returned
+            // indices can be mapped straight onto the rendered row.
+            let display_text = item.display_text();
 
-            // Match against the actual display text
             if let Some((score, indices)) =
                 self.matcher.fuzzy_indices(&display_text, &self.search_term)
             {
@@ -172,32 +172,6 @@ impl SearchEngine {
                     self.selected_index = Some(0);
                 }
                 _ => {} // Keep current selection if valid
-            }
-        }
-    }
-
-    /// Get the display text used for searching (matches what's rendered)
-    fn get_display_text_for_search(item: &SessionItem) -> String {
-        match item {
-            SessionItem::ExistingSession {
-                name,
-                directory,
-                is_current,
-            } => {
-                let prefix = if *is_current { "● " } else { "○ " };
-                format!("{}{} ({})", prefix, name, directory)
-            }
-            SessionItem::ResurrectableSession { name, duration } => {
-                // For resurrectable sessions, we show the name and duration
-                format!(
-                    "↺ {} (created {} ago)",
-                    name,
-                    humantime::format_duration(*duration)
-                )
-            }
-            SessionItem::Directory { path, .. } => {
-                // For directories, we search the full path as displayed
-                path.clone()
             }
         }
     }

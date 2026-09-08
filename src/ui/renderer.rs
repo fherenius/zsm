@@ -2,6 +2,10 @@ use zellij_tile::prelude::{
     print_table_with_coordinates, print_text_with_coordinates, Palette, Table, Text,
 };
 
+use zsm::text::{
+    elide_middle, elide_start, remap_indices_after_elide_middle, remap_indices_after_elide_start,
+};
+
 use crate::session::SessionItem;
 use crate::state::{ActiveScreen, PluginState};
 use crate::ui::{Colors, Theme};
@@ -168,123 +172,77 @@ impl PluginRenderer {
         table
     }
 
-    /// Render a search result item
+    /// Render a search result item, moving the highlight positions onto the
+    /// shortened text that is actually drawn.
     fn render_search_result_item(
         item: &SessionItem,
         indices: &[usize],
         max_width: usize,
         theme: &Option<Theme>,
     ) -> Text {
-        let mut text = Self::render_item(item, max_width, theme);
+        let text = Self::render_item(item, max_width, theme);
 
-        // Apply search highlighting
-        if !indices.is_empty() {
-            // Now indices should match the display text exactly since search matches against display text
-            // But we need to handle truncation for directories
-            let adjusted_indices = match item {
-                SessionItem::ExistingSession { .. } => {
-                    // Indices should match the display text exactly
-                    indices.to_vec()
-                }
-                SessionItem::ResurrectableSession { .. } => {
-                    // Indices should match the display text exactly
-                    indices.to_vec()
-                }
-                SessionItem::Directory { path, .. } => {
-                    // Handle truncation for long paths
-                    if path.len() > max_width && max_width > 10 {
-                        // Path is truncated with "..."
-                        let truncated_start = path.len().saturating_sub(max_width - 3);
-                        indices
-                            .iter()
-                            .filter_map(|&idx| {
-                                if idx >= truncated_start {
-                                    Some(idx - truncated_start + 3) // +3 for "..."
-                                } else {
-                                    None // Index is in truncated part
-                                }
-                            })
-                            .collect()
-                    } else {
-                        indices.to_vec()
-                    }
-                }
-            };
-
-            if !adjusted_indices.is_empty() {
-                if let Some(theme) = theme {
-                    text = theme.highlight(text, adjusted_indices);
-                } else {
-                    text = text.color_indices(3, adjusted_indices);
-                }
-            }
+        if indices.is_empty() {
+            return text;
         }
 
-        text
+        // `indices` address `SessionItem::display_text`, which `render_item`
+        // shortens to fit the pane, so they have to be remapped the same way.
+        let display_text = item.display_text();
+        let adjusted_indices = match item {
+            SessionItem::Directory { .. } => {
+                remap_indices_after_elide_start(&display_text, max_width, indices)
+            }
+            _ => remap_indices_after_elide_middle(&display_text, max_width, indices),
+        };
+
+        if adjusted_indices.is_empty() {
+            return text;
+        }
+
+        match theme {
+            Some(theme) => theme.highlight(text, adjusted_indices),
+            None => text.color_indices(3, adjusted_indices),
+        }
     }
 
-    /// Render a session item
+    /// Render a session item, shortened to `max_width` characters.
+    ///
+    /// Directories keep their tail (the project directory is the informative
+    /// part); sessions keep both ends, since the name leads and the directory
+    /// trails.
     fn render_item(item: &SessionItem, max_width: usize, theme: &Option<Theme>) -> Text {
+        let display_text = item.display_text();
+
         match item {
-            SessionItem::ExistingSession {
-                name,
-                directory,
-                is_current,
-            } => {
-                let prefix = if *is_current { "● " } else { "○ " };
-                // Sessions with no matching zoxide directory (random auto-names,
-                // cwd not in zoxide, names from an old base_paths scheme) have an
-                // empty directory — drop the "()" rather than render it empty.
-                let display_text = if directory.is_empty() {
-                    format!("{}{}", prefix, name)
-                } else {
-                    format!("{}{} ({})", prefix, name, directory)
-                };
-
-                let truncated_text = Self::get_truncated_text(&display_text, max_width);
-
-                if let Some(theme) = theme {
-                    if *is_current {
-                        theme.current_session(&truncated_text)
-                    } else {
-                        theme.available_session(&truncated_text)
+            SessionItem::ExistingSession { is_current, .. } => {
+                let shortened = elide_middle(&display_text, max_width);
+                match theme {
+                    Some(theme) => {
+                        if *is_current {
+                            theme.current_session(&shortened)
+                        } else {
+                            theme.available_session(&shortened)
+                        }
                     }
-                } else {
-                    let mut text = Text::new(&truncated_text);
-                    if *is_current {
-                        text = text.color_range(2, ..);
-                    } else {
-                        text = text.color_range(3, ..);
+                    None => {
+                        let color = if *is_current { 2 } else { 3 };
+                        Text::new(&shortened).color_range(color, ..)
                     }
-                    text
                 }
             }
-            SessionItem::ResurrectableSession { name, duration } => {
-                let display_text = format!(
-                    "↺ {} (created {} ago)",
-                    name,
-                    humantime::format_duration(*duration)
-                );
-
-                let truncated_text = Self::get_truncated_text(&display_text, max_width);
-
-                if let Some(theme) = theme {
-                    theme.available_session(&truncated_text)
-                } else {
-                    Text::new(&truncated_text).color_range(4, ..)
+            SessionItem::ResurrectableSession { .. } => {
+                let shortened = elide_middle(&display_text, max_width);
+                match theme {
+                    Some(theme) => theme.available_session(&shortened),
+                    None => Text::new(&shortened).color_range(3, ..),
                 }
             }
-            SessionItem::Directory { path, .. } => {
-                let display_path = if path.len() > max_width && max_width > 10 {
-                    format!("...{}", &path[path.len().saturating_sub(max_width - 3)..])
-                } else {
-                    path.to_string()
-                };
-
-                if let Some(theme) = theme {
-                    theme.content(&display_path)
-                } else {
-                    Text::new(&display_path)
+            SessionItem::Directory { .. } => {
+                let shortened = elide_start(&display_text, max_width);
+                match theme {
+                    Some(theme) => theme.content(&shortened),
+                    None => Text::new(&shortened),
                 }
             }
         }
@@ -384,18 +342,6 @@ impl PluginRenderer {
             (first_row_index, last_row_index)
         } else {
             (0, items_len)
-        }
-    }
-
-    fn get_truncated_text(text: &str, max_width: usize) -> String {
-        if text.len() > max_width && max_width > 10 {
-            format!(
-                "{}...{}",
-                &text[..10],
-                &text[text.len().saturating_sub(max_width - 13)..]
-            )
-        } else {
-            text.to_string()
         }
     }
 }
