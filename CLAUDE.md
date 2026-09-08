@@ -41,7 +41,17 @@ watchexec --exts rs -- 'cargo build; zellij action start-or-reload-plugin file:t
 
 Plugin logs (including `eprintln!`) go to Zellij's log file, e.g. `tail -f $(find /private/var/folders -name zellij.log)` on macOS (see `zellij.kdl` for the dev layout's log pane).
 
-There is currently **no test suite**. If adding tests, note the default target is WASM — run them against the host with `cargo test --target <host-triple>`.
+### Tests
+
+The pure logic lives in a **lib target** (`src/lib.rs`) precisely so it can be tested: the binary links `zellij-tile`, whose host imports are undefined off `wasm32-wasip1`, so a test harness containing the binary will not link. Run the suite against the host:
+
+```bash
+cargo test --lib --target aarch64-apple-darwin   # or your host triple
+```
+
+Anything Zellij-free belongs in the lib (`naming`, `session_name`, `text`, `list`, `config`) and should come with tests. The binary modules (`state`, `ui`, `session`, `zoxide`, `new_session_info`) are not covered — keep logic out of them where you reasonably can.
+
+Note: nixpkgs' `rustc` ships no `wasm32-wasip1` std, so a plain `nix shell nixpkgs#cargo` can only `cargo check --target <host>`. For a real WASM build without rustup, use docker: `docker run --rm -v "$PWD":/w -w /w rust:1-slim sh -c 'rustup target add wasm32-wasip1 && cargo build --release'`.
 
 ## Architecture
 
@@ -50,31 +60,36 @@ There is currently **no test suite**. If adding tests, note the default target i
 `register_plugin!(PluginState)` wires `PluginState` into Zellij via the `ZellijPlugin` trait. The flow is strictly event-driven:
 
 1. **`load()`** — initializes config from the KDL `BTreeMap`, requests permissions (`RunCommands`, `ReadApplicationState`, `ChangeApplicationState`, `MessageAndLaunchOtherPlugins`), and subscribes to events. **It does not fetch zoxide directories yet.**
-2. **`update(event)`** — handles `Key`, `SessionUpdate`, `ModeUpdate`, `RunCommandResult`, `PermissionRequestResult`. Returns `bool` = "should re-render". Zoxide is fetched only **after** `PermissionStatus::Granted` arrives — this permission-gated sequencing is load-bearing; fetching earlier silently fails.
+2. **`update(event)`** — handles `Key`, `SessionUpdate`, `ModeUpdate`, `RunCommandResult`, `PermissionRequestResult`, `Visible`. Returns `bool` = "should re-render". Zoxide is fetched only **after** `PermissionStatus::Granted` arrives — this permission-gated sequencing is load-bearing; fetching earlier silently fails. `Visible(true)` re-queries zoxide and re-pulls the session list, so **naming and the merge re-run every time the plugin is shown** — keep both cheap.
 3. **`pipe()`** — receives the filepicker plugin's result (matched by `request_id`).
 4. **`render(rows, cols)`** — delegates to `PluginRenderer`.
 
-`update()` also owns zoxide integration: it runs `zoxide query -l -s` (output is `"<score> <path>"` per line) and the **smart session-naming algorithm** (`generate_smart_session_names` and helpers).
+`update()` also owns zoxide integration: it runs `zoxide query -l -s` (output is `"<score> <path>"` per line) and hands the paths to `zsm::naming::session_names` for the **smart session-naming algorithm**.
 
 ### State & screens (`src/state.rs`)
 
-`PluginState` is the single source of truth. It routes keys by `ActiveScreen` (`Main` or `NewSession`), holds the `SessionManager`, `SearchEngine`, `NewSessionInfo`, zoxide directories, config, colors, and pending-deletion / filepicker `request_id` state.
+`PluginState` is the single source of truth. It routes keys by `ActiveScreen` (`Main` or `NewSession`), holds the `SessionManager`, `SearchEngine`, `NewSessionInfo`, zoxide directories, config, the cached item list, and pending-deletion / filepicker `request_id` state.
 
-`combined_items()` is the core data merge: it matches existing/resurrectable Zellij sessions against zoxide-derived session names (including incremented variants like `project.2`) and produces a `Vec<SessionItem>` of `ExistingSession` / `ResurrectableSession` / `Directory`. When searching, items come from `SearchEngine` instead; otherwise from this list.
+`build_combined_items()` is the core data merge: it matches existing/resurrectable Zellij sessions against zoxide-derived session names (including incremented variants like `project.2`) and produces a `Vec<SessionItem>` of `ExistingSession` / `ResurrectableSession` / `Directory`. The result is **cached** in the `combined_items` field and rebuilt only by `rebuild_combined_items()`, which every `update_*` method calls — it is read several times per render and once per keystroke. `rebuild_combined_items()` also re-runs the active search and clamps `selected_index`, so any new way of changing the data must go through it. When searching, displayed rows come from `SearchEngine` instead.
 
 ### Module map
 
 - `session/` — `SessionManager` (switch/kill/delete-dead sessions, `generate_incremented_name`) and `types.rs` (`SessionItem`, `SessionAction`).
-- `zoxide/` — `ZoxideDirectory` (path + ranking + generated `session_name`) and `SearchEngine` (fuzzy matching via `fuzzy-matcher`/skim; sorts sessions before directories; matches against the *rendered* display text).
+- `zoxide/` — `ZoxideDirectory` (path + ranking + generated `session_name`; its `Ord` is what `process_zoxide_output` sorts by) and `SearchEngine` (fuzzy matching via `fuzzy-matcher`/skim; sorts sessions before directories). Search matches `SessionItem::display_text`, which is **also** what the renderer draws — that shared method is what keeps fuzzy match indices pointing at the right characters, so do not format rows anywhere else.
 - `new_session_info.rs` — the new-session screen state machine: `EnteringName` → `EnteringLayoutSearch`, with layout fuzzy search and the actual `switch_session_with_layout`/`switch_session_with_cwd` calls.
-- `ui/` — `PluginRenderer` (`renderer.rs`) draws both screens via `print_text_with_coordinates` / `print_table_with_coordinates`. `theme.rs` uses **indexed colors (0–3) that map to the user's Zellij theme** — `Theme::new` deliberately ignores the palette; do not hardcode RGB.
-- `config.rs` — `Config::from_zellij_config` parses the KDL options. `base_paths` is a **pipe-separated** (`|`) list.
+- `ui/` — `PluginRenderer` (`renderer.rs`) draws both screens via `print_text_with_coordinates` / `print_table_with_coordinates`. `theme.rs` uses **indexed colors (0–3) that map to the user's Zellij theme**; there is deliberately no palette anywhere, so do not hardcode RGB. Add a named role to `Theme` rather than calling `color_range` at the call site.
+- **Lib target** (`lib.rs`, all Zellij-free and unit tested):
+  - `naming.rs` — the smart session-naming algorithm (`session_names`).
+  - `session_name.rs` — the hard limits (`validate`, `validate_against_current`) and the `base`/`base.2`/`base.3` series (`first_free_increment`). Every path that creates a session goes through these.
+  - `text.rs` — character-safe shortening for the UI. **Never slice a `str` by byte offset or call `String::truncate` on display text**: a cut inside a codepoint panics, and a panic traps the WASM instance and kills the plugin.
+  - `list.rs` — scrolling window and selection movement, shared by the main list and the layout list.
+  - `config.rs` — `Config::from_zellij_config` parses the KDL options. `base_paths` is a **pipe-separated** (`|`) list.
 
 ### Key constraints & gotchas
 
-- **Session-name length limit (~29 chars).** Zellij session names live in a Unix-domain-socket path capped at 108 bytes, and the socket path isn't knowable from WASM. `generate_context_aware_name` / `apply_smart_truncation` target ~29 chars; key handlers hard-reject names ≥ 108 bytes and any name containing `/`. Preserve these checks when touching naming.
-- **Smart naming** resolves basename conflicts by adding the minimal number of leading path segments, adds extra context for directories nested inside other zoxide dirs, and abbreviates/truncates (`abbreviate_segment`) only when over the length cap. `normalize_path` strips the longest matching `base_path` first (exact matches keep the full path).
-- **Filepicker** is launched as a separate plugin via `pipe_message_to_plugin`; correlation is by a UUID `request_id` tracked in `PluginState.request_ids` and validated in `pipe()`.
+- **Session-name length limit.** Zellij session names live in a Unix-domain-socket path capped at 108 bytes, and the socket path isn't knowable from WASM. Generated names aim for `naming::MAX_GENERATED_NAME_LEN` (29 chars); `session_name::MAX_SESSION_NAME_BYTES` (108) is the hard limit actually enforced, along with rejecting any name containing `/`. Preserve these checks when touching naming.
+- **Smart naming** resolves basename conflicts by adding the minimal number of leading path segments, adds extra context for directories nested inside other zoxide dirs, and abbreviates/truncates (`abbreviate_segment`) only when over the length cap. `normalize_path` strips the longest matching `base_path` first (exact matches keep the full path). Nesting is decided by looking up each path's ancestors in a set — keep it out of the O(n²) shape, since zoxide databases run to thousands of entries and naming re-runs every time the plugin is shown.
+- **Filepicker** is launched as a separate plugin via `pipe_message_to_plugin`; correlation is by a UUID `request_id` tracked in `PluginState.request_ids` and validated in `pipe()`. The returned path is used as-is: **a plugin cannot stat host paths** (it only sees the `/host`, `/data`, `/tmp` preopens), so `Path::exists`/`is_file` always report "missing" here and must not be used to make decisions.
 
 ## Config (Zellij KDL layout, not env/files)
 
