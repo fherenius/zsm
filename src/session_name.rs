@@ -9,6 +9,9 @@
 /// Hard upper bound on a session name, from the 108-byte socket path limit.
 pub const MAX_SESSION_NAME_BYTES: usize = 108;
 
+/// Highest increment tried before the caller falls back to a random suffix.
+const MAX_INCREMENT: u32 = 1000;
+
 /// Check a session name against the limits Zellij imposes.
 ///
 /// An empty name is accepted: every caller maps it to "let Zellij pick a
@@ -36,6 +39,28 @@ pub fn validate_against_current(name: &str, current: Option<&str>) -> Result<(),
     }
 
     Ok(())
+}
+
+/// Pick the first unused name in the series `base`, `base<sep>2`, `base<sep>3`.
+///
+/// `is_taken` must report live *and* resurrectable sessions. Switching to the
+/// name of a dead session resurrects it instead of creating a fresh one, so
+/// the requested directory and layout would be silently ignored.
+///
+/// Returns `None` when every candidate up to [`MAX_INCREMENT`] is taken,
+/// leaving the caller to invent a unique suffix.
+pub fn first_free_increment(
+    base: &str,
+    separator: &str,
+    is_taken: impl Fn(&str) -> bool,
+) -> Option<String> {
+    if !is_taken(base) {
+        return Some(base.to_string());
+    }
+
+    (2..=MAX_INCREMENT)
+        .map(|counter| format!("{}{}{}", base, separator, counter))
+        .find(|candidate| !is_taken(candidate))
 }
 
 #[cfg(test)]
@@ -81,5 +106,44 @@ mod tests {
         assert!(validate_against_current("", Some("zsm")).is_ok());
         // The cheaper checks still apply.
         assert!(validate_against_current("a/b", Some("zsm")).is_err());
+    }
+
+    #[test]
+    fn a_free_base_name_is_used_as_is() {
+        assert_eq!(
+            first_free_increment("zsm", ".", |_| false),
+            Some("zsm".to_string())
+        );
+    }
+
+    #[test]
+    fn taken_names_are_incremented() {
+        let taken = ["zsm", "zsm.2", "zsm.3"];
+        assert_eq!(
+            first_free_increment("zsm", ".", |name| taken.contains(&name)),
+            Some("zsm.4".to_string())
+        );
+        assert_eq!(
+            first_free_increment("zsm", "_", |name| name == "zsm"),
+            Some("zsm_2".to_string())
+        );
+    }
+
+    /// Regression: only the base name was checked against resurrectable
+    /// sessions, so an increment could land on a dead session's name. Zellij
+    /// then resurrects that session and the requested cwd and layout are lost.
+    #[test]
+    fn increments_avoid_resurrectable_names_too() {
+        let live = ["zsm"];
+        let resurrectable = ["zsm.2", "zsm.3"];
+        let name = first_free_increment("zsm", ".", |name| {
+            live.contains(&name) || resurrectable.contains(&name)
+        });
+        assert_eq!(name, Some("zsm.4".to_string()));
+    }
+
+    #[test]
+    fn an_exhausted_series_gives_up_so_the_caller_can_randomise() {
+        assert_eq!(first_free_increment("zsm", ".", |_| true), None);
     }
 }

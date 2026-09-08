@@ -416,8 +416,12 @@ impl PluginState {
     fn handle_deletion_confirmation(&mut self, key: KeyWithModifier, _session_name: &str) -> bool {
         match key.bare_key {
             BareKey::Char('y') | BareKey::Char('Y') if key.has_no_modifiers() => {
-                if let Err(e) = self.session_manager.confirm_deletion() {
-                    self.set_error(format!("Failed to delete session: {}", e));
+                match self.session_manager.confirm_deletion() {
+                    // Re-pull the list: our copy still holds the session we
+                    // just killed, so the row would linger until the next
+                    // SessionUpdate happened to arrive.
+                    Ok(()) => self.fetch_sessions(),
+                    Err(e) => self.set_error(format!("Failed to delete session: {}", e)),
                 }
                 true
             }
