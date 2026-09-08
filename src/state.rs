@@ -290,8 +290,8 @@ impl PluginState {
                 self.handle_quick_session_creation();
                 true
             }
-            BareKey::Delete if key.has_no_modifiers() => {
-                self.handle_delete_key();
+            BareKey::Char('d') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
+                self.handle_kill_shortcut();
                 true
             }
             BareKey::Char(c) if key.has_no_modifiers() && c != '\n' => {
@@ -461,8 +461,8 @@ impl PluginState {
         }
     }
 
-    /// Handle delete key
-    fn handle_delete_key(&mut self) {
+    /// Handle the kill-session shortcut
+    fn handle_kill_shortcut(&mut self) {
         // Get the selected item data before any mutable borrows
         let selected_session_name = self.selected_item().and_then(|item| match item {
             SessionItem::ExistingSession { name, .. } => Some(name),

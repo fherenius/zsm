@@ -219,7 +219,7 @@ impl PluginRenderer {
                 "Ctrl+r: reload directories • Esc: Exit"
             }
         } else {
-            "↑/↓: Navigate • Enter: Switch/New • Ctrl+Enter: Quick create • Ctrl+r: reload directories • Delete: Kill • Type: Search • Esc: Exit"
+            "↑/↓: Navigate • Enter: Switch/New • Ctrl+Enter: Quick create • Ctrl+r: reload directories • Ctrl+d: Kill • Type: Search • Esc: Exit"
         };
 
         print_text_with_coordinates(theme.help(help_text), x, y, None, None);

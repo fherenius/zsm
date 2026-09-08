@@ -11,7 +11,7 @@ categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
 
 [dependencies]
-zellij-tile = "0.44.3"
+zellij-tile = "0.45.1"
 serde = { version = "1.0.164", features = ["derive"] }
 fuzzy-matcher = "0.3.7"
 uuid = { version = "1.8.0", features = ["v4"] }
