@@ -33,6 +33,13 @@ pub struct PluginState {
     request_ids: Vec<String>,
     /// Selected index in main list (when not searching)
     selected_index: Option<usize>,
+    /// Cached merge of sessions and zoxide directories.
+    ///
+    /// Rebuilt only when sessions or directories change. It is read several
+    /// times per render and once per keystroke, and building it clones every
+    /// name and path and matches each session against every directory, so
+    /// rebuilding it on demand was pure waste.
+    combined_items: Vec<SessionItem>,
 }
 
 /// Represents the different screens in the plugin
@@ -64,6 +71,7 @@ impl Default for PluginState {
             current_session_name: None,
             request_ids: Vec::new(),
             selected_index: None,
+            combined_items: Vec::new(),
         }
     }
 }
@@ -87,8 +95,7 @@ impl PluginState {
         }
 
         self.session_manager.update_sessions(sessions);
-        self.update_search_if_needed();
-        self.clamp_selection();
+        self.rebuild_combined_items();
     }
 
     /// Update session information for resurrectable sessions
@@ -98,15 +105,13 @@ impl PluginState {
     ) {
         self.session_manager
             .update_resurrectable_sessions(resurrectable_sessions);
-        self.update_search_if_needed();
-        self.clamp_selection();
+        self.rebuild_combined_items();
     }
 
     /// Update zoxide directories (managed separately from sessions)
     pub fn update_zoxide_directories(&mut self, directories: Vec<ZoxideDirectory>) {
         self.zoxide_directories = directories;
-        self.update_search_if_needed();
-        self.clamp_selection();
+        self.rebuild_combined_items();
     }
 
     /// Handle key input
@@ -137,22 +142,31 @@ impl PluginState {
         self.active_screen
     }
 
-    /// Get items to display (combined sessions and zoxide directories)
-    pub fn display_items(&self) -> Vec<SessionItem> {
+    /// The merged session and directory list, as last built.
+    pub fn combined_items(&self) -> &[SessionItem] {
+        &self.combined_items
+    }
+
+    /// How many rows are on screen: search results while searching, otherwise
+    /// the full list.
+    pub fn visible_item_count(&self) -> usize {
         if self.search_engine.is_searching() {
-            // Return items from search results
-            self.search_engine
-                .results()
-                .iter()
-                .map(|result| result.item.clone())
-                .collect()
+            self.search_engine.results().len()
         } else {
-            self.combined_items()
+            self.combined_items.len()
         }
     }
 
+    /// Rebuild the cached item list, then bring the search and selection back
+    /// in line with it.
+    fn rebuild_combined_items(&mut self) {
+        self.combined_items = self.build_combined_items();
+        self.update_search_if_needed();
+        self.clamp_selection();
+    }
+
     /// Combine sessions and zoxide directories for display
-    fn combined_items(&self) -> Vec<SessionItem> {
+    fn build_combined_items(&self) -> Vec<SessionItem> {
         let mut items = Vec::new();
 
         // Show every live Zellij session. A zoxide directory is matched only to
@@ -201,17 +215,6 @@ impl PluginState {
         items
     }
 
-    /// Number of rows `combined_items` produces, without building the list.
-    fn combined_item_count(&self) -> usize {
-        let resurrectable_count = if self.config.show_resurrectable_sessions {
-            self.session_manager.resurrectable_sessions().len()
-        } else {
-            0
-        };
-
-        self.session_manager.sessions().len() + resurrectable_count + self.zoxide_directories.len()
-    }
-
     /// Pull `selected_index` back inside the item list.
     ///
     /// The list moves underneath the selection whenever zoxide is re-queried
@@ -219,8 +222,7 @@ impl PluginState {
     /// index used to scroll the render window off the end of the list, drawing
     /// an empty table while items existed, and made Enter a silent no-op.
     fn clamp_selection(&mut self) {
-        self.selected_index =
-            list::clamp_selection(self.selected_index, self.combined_item_count());
+        self.selected_index = list::clamp_selection(self.selected_index, self.combined_items.len());
     }
 
     /// Check if session name is an incremented version of base name  
@@ -292,8 +294,8 @@ impl PluginState {
         if self.search_engine.is_searching() {
             self.search_engine.selected_item().cloned()
         } else {
-            let items = self.display_items();
-            self.selected_index.and_then(|i| items.get(i).cloned())
+            self.selected_index
+                .and_then(|index| self.combined_items.get(index).cloned())
         }
     }
 
@@ -321,13 +323,12 @@ impl PluginState {
                 true
             }
             BareKey::Char(c) if key.has_no_modifiers() && c != '\n' => {
-                let items = self.combined_items(); // Always use full item list, not search results
-                self.search_engine.add_char(c, &items);
+                // Always search the full item list, never the previous results.
+                self.search_engine.add_char(c, &self.combined_items);
                 true
             }
             BareKey::Backspace if key.has_no_modifiers() => {
-                let items = self.combined_items(); // Always use full item list, not search results
-                self.search_engine.backspace(&items);
+                self.search_engine.backspace(&self.combined_items);
                 true
             }
             BareKey::Esc if key.has_no_modifiers() => {
@@ -439,7 +440,7 @@ impl PluginState {
             self.search_engine.move_selection_up();
         } else {
             self.selected_index =
-                list::select_previous(self.selected_index, self.combined_item_count());
+                list::select_previous(self.selected_index, self.combined_items.len());
         }
     }
 
@@ -448,8 +449,7 @@ impl PluginState {
         if self.search_engine.is_searching() {
             self.search_engine.move_selection_down();
         } else {
-            self.selected_index =
-                list::select_next(self.selected_index, self.combined_item_count());
+            self.selected_index = list::select_next(self.selected_index, self.combined_items.len());
         }
     }
 
@@ -501,12 +501,11 @@ impl PluginState {
         }
     }
 
-    /// Update search if currently searching
+    /// Re-run the active search against the rebuilt item list.
     fn update_search_if_needed(&mut self) {
         if self.search_engine.is_searching() {
             let term = self.search_engine.search_term().to_string();
-            let items = self.combined_items(); // Always use full item list, not search results
-            self.search_engine.update_search(term, &items);
+            self.search_engine.update_search(term, &self.combined_items);
         }
     }
 

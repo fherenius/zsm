@@ -66,7 +66,7 @@ impl PluginRenderer {
             Self::render_all_items(state, table_rows, width, &theme)
         };
 
-        if state.display_items().is_empty() && !state.search_engine().is_searching() {
+        if state.visible_item_count() == 0 && !state.search_engine().is_searching() {
             let no_dirs_text = if let Some(theme) = &theme {
                 theme.warning("No zoxide directories found. Make sure zoxide is installed and you have visited some directories.")
             } else {
@@ -146,7 +146,7 @@ impl PluginRenderer {
         theme: &Option<Theme>,
     ) -> Table {
         let mut table = Table::new().add_row(vec!["Directory/Session"]);
-        let items = state.display_items();
+        let items = state.combined_items();
         let selected_index = state.selected_index();
 
         let (first_row, last_row) = visible_range(table_rows, items.len(), selected_index);
@@ -249,7 +249,7 @@ impl PluginRenderer {
 
     /// Render help text
     fn render_help_text(state: &PluginState, x: usize, y: usize, theme: &Option<Theme>) {
-        let help_text = if state.display_items().is_empty() {
+        let help_text = if state.visible_item_count() == 0 {
             "Type session name and press Enter • Ctrl+Enter: Quick create • Esc: Exit"
         } else {
             "↑/↓: Navigate • Enter: Switch/New • Ctrl+Enter: Quick create • Ctrl+r: reload directories • Delete: Kill • Type: Search • Esc: Exit"
