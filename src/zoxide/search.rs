@@ -1,6 +1,7 @@
 use crate::session::SessionItem;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use zsm::list;
 
 /// Search result containing an item and match information
 #[derive(Debug, Clone)]
@@ -95,28 +96,12 @@ impl SearchEngine {
 
     /// Move selection up
     pub fn move_selection_up(&mut self) {
-        if let Some(selected) = self.selected_index.as_mut() {
-            if *selected == 0 {
-                *selected = self.results.len().saturating_sub(1);
-            } else {
-                *selected = selected.saturating_sub(1);
-            }
-        } else if !self.results.is_empty() {
-            self.selected_index = Some(self.results.len().saturating_sub(1));
-        }
+        self.selected_index = list::select_previous(self.selected_index, self.results.len());
     }
 
     /// Move selection down
     pub fn move_selection_down(&mut self) {
-        if let Some(selected) = self.selected_index.as_mut() {
-            if *selected == self.results.len().saturating_sub(1) {
-                *selected = 0;
-            } else {
-                *selected = *selected + 1;
-            }
-        } else if !self.results.is_empty() {
-            self.selected_index = Some(0);
-        }
+        self.selected_index = list::select_next(self.selected_index, self.results.len());
     }
 
     /// Get currently selected item

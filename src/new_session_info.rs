@@ -2,6 +2,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
+use zsm::list::visible_range;
 
 #[derive(Default)]
 pub struct NewSessionInfo {
@@ -221,7 +222,7 @@ impl NewSessionInfo {
     }
     pub fn layout_list(&self, max_rows: usize) -> Vec<(LayoutInfo, bool)> {
         // bool - is_selected
-        let range_to_render = self.range_to_render(
+        let range_to_render = visible_range(
             max_rows,
             self.layout_count(),
             Some(self.layout_list.selected_layout_index),
@@ -259,7 +260,7 @@ impl NewSessionInfo {
     }
     pub fn layout_search_results(&self, max_rows: usize) -> Vec<(LayoutSearchResult, bool)> {
         // bool - is_selected
-        let range_to_render = self.range_to_render(
+        let range_to_render = visible_range(
             max_rows,
             self.layout_list.layout_search_results.len(),
             Some(self.layout_list.selected_layout_index),
@@ -272,26 +273,6 @@ impl NewSessionInfo {
             .take(range_to_render.1)
             .skip(range_to_render.0)
             .collect()
-    }
-    // TODO: merge with similar function in zoxide_directories
-    fn range_to_render(
-        &self,
-        table_rows: usize,
-        results_len: usize,
-        selected_index: Option<usize>,
-    ) -> (usize, usize) {
-        if table_rows <= results_len {
-            let row_count_to_render = table_rows.saturating_sub(1); // 1 for the title
-            let first_row_index_to_render = selected_index
-                .unwrap_or(0)
-                .saturating_sub(row_count_to_render / 2);
-            let last_row_index_to_render = first_row_index_to_render + row_count_to_render;
-            (first_row_index_to_render, last_row_index_to_render)
-        } else {
-            let first_row_index_to_render = 0;
-            let last_row_index_to_render = results_len;
-            (first_row_index_to_render, last_row_index_to_render)
-        }
     }
     pub fn is_searching(&self) -> bool {
         !self.layout_list.layout_search_term.is_empty()

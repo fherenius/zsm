@@ -5,4 +5,5 @@
 //! Anything here is free of Zellij dependencies and is covered by
 //! `cargo test --lib --target <host-triple>`.
 
+pub mod list;
 pub mod text;

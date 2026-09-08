@@ -2,6 +2,7 @@ use zellij_tile::prelude::{
     print_table_with_coordinates, print_text_with_coordinates, Palette, Table, Text,
 };
 
+use zsm::list::visible_range;
 use zsm::text::{
     elide_middle, elide_start, remap_indices_after_elide_middle, remap_indices_after_elide_start,
 };
@@ -114,8 +115,7 @@ impl PluginRenderer {
         let results = state.search_engine().results();
         let selected_index = state.search_engine().selected_index();
 
-        let (first_row, last_row) =
-            Self::calculate_render_range(table_rows, results.len(), selected_index);
+        let (first_row, last_row) = visible_range(table_rows, results.len(), selected_index);
 
         for i in first_row..last_row {
             if let Some(result) = results.get(i) {
@@ -149,8 +149,7 @@ impl PluginRenderer {
         let items = state.display_items();
         let selected_index = state.selected_index();
 
-        let (first_row, last_row) =
-            Self::calculate_render_range(table_rows, items.len(), selected_index);
+        let (first_row, last_row) = visible_range(table_rows, items.len(), selected_index);
 
         for i in first_row..last_row {
             if let Some(item) = items.get(i) {
@@ -325,23 +324,5 @@ impl PluginRenderer {
         let y = 0;
         let height = rows.saturating_sub(y);
         (x, y, width, height)
-    }
-
-    /// Calculate which rows to render for pagination
-    fn calculate_render_range(
-        table_rows: usize,
-        items_len: usize,
-        selected_index: Option<usize>,
-    ) -> (usize, usize) {
-        if table_rows <= items_len {
-            let row_count_to_render = table_rows.saturating_sub(1); // 1 for the title
-            let first_row_index = selected_index
-                .unwrap_or(0)
-                .saturating_sub(row_count_to_render / 2);
-            let last_row_index = first_row_index + row_count_to_render;
-            (first_row_index, last_row_index)
-        } else {
-            (0, items_len)
-        }
     }
 }

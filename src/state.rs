@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 use zellij_tile::prelude::*;
+use zsm::list;
 
 use crate::config::Config;
 use crate::new_session_info::NewSessionInfo;
@@ -86,6 +87,7 @@ impl PluginState {
 
         self.session_manager.update_sessions(sessions);
         self.update_search_if_needed();
+        self.clamp_selection();
     }
 
     /// Update session information for resurrectable sessions
@@ -96,12 +98,14 @@ impl PluginState {
         self.session_manager
             .update_resurrectable_sessions(resurrectable_sessions);
         self.update_search_if_needed();
+        self.clamp_selection();
     }
 
     /// Update zoxide directories (managed separately from sessions)
     pub fn update_zoxide_directories(&mut self, directories: Vec<ZoxideDirectory>) {
         self.zoxide_directories = directories;
         self.update_search_if_needed();
+        self.clamp_selection();
     }
 
     /// Handle key input
@@ -194,6 +198,28 @@ impl PluginState {
         }
 
         items
+    }
+
+    /// Number of rows `combined_items` produces, without building the list.
+    fn combined_item_count(&self) -> usize {
+        let resurrectable_count = if self.config.show_resurrectable_sessions {
+            self.session_manager.resurrectable_sessions().len()
+        } else {
+            0
+        };
+
+        self.session_manager.sessions().len() + resurrectable_count + self.zoxide_directories.len()
+    }
+
+    /// Pull `selected_index` back inside the item list.
+    ///
+    /// The list moves underneath the selection whenever zoxide is re-queried
+    /// (every time the plugin is shown) or a session starts or dies. A stale
+    /// index used to scroll the render window off the end of the list, drawing
+    /// an empty table while items existed, and made Enter a silent no-op.
+    fn clamp_selection(&mut self) {
+        self.selected_index =
+            list::clamp_selection(self.selected_index, self.combined_item_count());
     }
 
     /// Check if session name is an incremented version of base name  
@@ -403,20 +429,8 @@ impl PluginState {
         if self.search_engine.is_searching() {
             self.search_engine.move_selection_up();
         } else {
-            let items_len = self.display_items().len();
-            if items_len == 0 {
-                return;
-            }
-
-            if let Some(selected) = self.selected_index.as_mut() {
-                if *selected == 0 {
-                    *selected = items_len.saturating_sub(1);
-                } else {
-                    *selected = selected.saturating_sub(1);
-                }
-            } else {
-                self.selected_index = Some(items_len.saturating_sub(1));
-            }
+            self.selected_index =
+                list::select_previous(self.selected_index, self.combined_item_count());
         }
     }
 
@@ -425,20 +439,8 @@ impl PluginState {
         if self.search_engine.is_searching() {
             self.search_engine.move_selection_down();
         } else {
-            let items_len = self.display_items().len();
-            if items_len == 0 {
-                return;
-            }
-
-            if let Some(selected) = self.selected_index.as_mut() {
-                if *selected == items_len.saturating_sub(1) {
-                    *selected = 0;
-                } else {
-                    *selected = *selected + 1;
-                }
-            } else {
-                self.selected_index = Some(0);
-            }
+            self.selected_index =
+                list::select_next(self.selected_index, self.combined_item_count());
         }
     }
 
