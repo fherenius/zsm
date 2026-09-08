@@ -106,50 +106,32 @@ impl ZellijPlugin for PluginState {
 
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         // Handle filepicker results for new session creation
-        if pipe_message.name == "filepicker_result" {
-            match (pipe_message.payload, pipe_message.args.get("request_id")) {
-                (Some(payload), Some(request_id)) => {
-                    // Check if this request ID is valid for our plugin
-                    if self.is_valid_request_id(request_id) {
-                        self.remove_request_id(request_id);
-                        let selected_path = std::path::PathBuf::from(payload);
-
-                        // Determine if we should use the path or its parent directory
-                        let session_folder = if selected_path.exists() {
-                            // Path exists, check if it's a file or directory
-                            if selected_path.is_file() {
-                                // If it's a file, use the parent directory
-                                selected_path
-                                    .parent()
-                                    .map(|p| p.to_path_buf())
-                                    .unwrap_or(selected_path)
-                            } else {
-                                // It's a directory, use it directly
-                                selected_path
-                            }
-                        } else {
-                            // Path doesn't exist, try to infer from extension or structure
-                            if let Some(_extension) = selected_path.extension() {
-                                // Has an extension, likely a file - use parent directory
-                                selected_path
-                                    .parent()
-                                    .map(|p| p.to_path_buf())
-                                    .unwrap_or(selected_path)
-                            } else {
-                                // No extension, assume it's a directory
-                                selected_path
-                            }
-                        };
-
-                        self.set_new_session_folder(Some(session_folder));
-                    }
-                }
-                _ => {}
-            }
-            true
-        } else {
-            false
+        if pipe_message.name != "filepicker_result" {
+            return false;
         }
+
+        let mut should_render = false;
+        if let (Some(payload), Some(request_id)) =
+            (pipe_message.payload, pipe_message.args.get("request_id"))
+        {
+            // Check if this request ID is valid for our plugin
+            if self.is_valid_request_id(request_id) {
+                self.remove_request_id(request_id);
+
+                // Use the picked path as-is. Probing it with `exists()` and
+                // `is_file()` cannot work from here: the plugin only sees its
+                // WASI preopens (/host, /data, /tmp), never an arbitrary host
+                // path, so those checks always reported "missing" and the
+                // extension fallback ran instead - which took the *parent* of
+                // any directory with a dot in its name, turning
+                // ~/projects/site.com into ~/projects. The filepicker is
+                // launched asking for a folder, so the path is the folder.
+                self.set_new_session_folder(Some(std::path::PathBuf::from(payload)));
+                should_render = true;
+            }
+        }
+
+        should_render
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
