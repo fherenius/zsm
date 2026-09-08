@@ -121,6 +121,24 @@ pub fn truncate_chars(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
 
+/// Truncate `text` to at most `max_bytes` bytes, cutting on a character
+/// boundary so the result stays valid UTF-8.
+///
+/// Session names are limited in *bytes* by the socket path, so a character
+/// budget alone is not enough for multi-byte names.
+pub fn truncate_bytes(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    text[..end].to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +252,26 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn byte_truncation_cuts_on_a_character_boundary() {
+        assert_eq!(truncate_bytes("abcdef", 3), "abc");
+        assert_eq!(truncate_bytes("abc", 10), "abc");
+
+        // Each of these is 2 bytes, so a 3-byte budget fits only one.
+        let two_byte = "\u{00e9}\u{00e9}\u{00e9}";
+        assert_eq!(truncate_bytes(two_byte, 3), "\u{00e9}");
+        assert_eq!(truncate_bytes(two_byte, 4), "\u{00e9}\u{00e9}");
+
+        // A budget smaller than the first character yields nothing rather
+        // than splitting it.
+        assert_eq!(truncate_bytes("\u{1f680}", 3), "");
+
+        for budget in 0..40 {
+            let out = truncate_bytes("/home/\u{043f}\u{0440}/\u{1f680}app", budget);
+            assert!(out.len() <= budget);
         }
     }
 }

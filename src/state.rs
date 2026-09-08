@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 use zellij_tile::prelude::*;
+use zsm::config::Config;
 use zsm::list;
 use zsm::session_name;
 
-use crate::config::Config;
 use crate::new_session_info::{NewSessionInfo, SelectionOutcome};
 use crate::session::{SessionAction, SessionItem, SessionManager};
 use crate::zoxide::{SearchEngine, ZoxideDirectory};
