@@ -12,13 +12,14 @@ pub struct ZoxideDirectory {
 }
 
 impl Ord for ZoxideDirectory {
+    /// Most-used first, then by path so equally-ranked directories keep a
+    /// stable order between refreshes.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Sort by ranking in descending order (higher scores first)
         other
             .ranking
             .partial_cmp(&self.ranking)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then(self.directory.cmp(&other.directory))
+            .then_with(|| self.directory.cmp(&other.directory))
     }
 }
 
@@ -29,5 +30,3 @@ impl PartialOrd for ZoxideDirectory {
 }
 
 impl Eq for ZoxideDirectory {}
-
-impl ZoxideDirectory {}

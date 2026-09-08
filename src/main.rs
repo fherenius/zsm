@@ -42,8 +42,10 @@ impl ZellijPlugin for PluginState {
         let mut should_render = false;
 
         match event {
-            Event::ModeUpdate(mode_info) => {
-                self.set_colors(mode_info.style.colors.into());
+            // The UI uses indexed colours, which Zellij resolves against the
+            // user's theme, so there is no palette to store - a theme change
+            // just needs a repaint.
+            Event::ModeUpdate(_) => {
                 should_render = true;
             }
             Event::Key(key) => {
@@ -200,12 +202,8 @@ impl PluginState {
             directory.session_name = name;
         }
 
-        // Sort by score in descending order (higher scores first)
-        directories.sort_by(|a, b| {
-            b.ranking
-                .partial_cmp(&a.ranking)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // Most-used first; see ZoxideDirectory's Ord impl.
+        directories.sort();
 
         self.update_zoxide_directories(directories);
     }

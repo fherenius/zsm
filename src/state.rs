@@ -26,8 +26,6 @@ pub struct PluginState {
     active_screen: ActiveScreen,
     /// Error message to display
     error: Option<String>,
-    /// Color scheme
-    colors: Option<Palette>,
     /// Current session name
     current_session_name: Option<String>,
     /// Request IDs for plugin communication
@@ -213,8 +211,10 @@ impl PluginState {
             return false;
         }
 
-        let number_part = &remainder[self.config.session_separator.len()..];
-        number_part.parse::<u32>().is_ok() && !number_part.is_empty()
+        // An empty remainder fails to parse, so it needs no separate check.
+        remainder[self.config.session_separator.len()..]
+            .parse::<u32>()
+            .is_ok()
     }
 
     /// Get search engine (for UI rendering)
@@ -241,14 +241,9 @@ impl PluginState {
         }
     }
 
-    /// Get colors
-    pub fn colors(&self) -> Option<Palette> {
-        self.colors
-    }
-
-    /// Set colors
-    pub fn set_colors(&mut self, colors: Palette) {
-        self.colors = Some(colors);
+    /// Whether `name` is the session the plugin is running in.
+    pub fn is_current_session(&self, name: &str) -> bool {
+        self.current_session_name.as_deref() == Some(name)
     }
 
     /// Show error message

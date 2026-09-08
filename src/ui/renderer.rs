@@ -1,5 +1,5 @@
 use zellij_tile::prelude::{
-    print_table_with_coordinates, print_text_with_coordinates, Palette, Table, Text,
+    print_table_with_coordinates, print_text_with_coordinates, Table, Text,
 };
 
 use zsm::list::visible_range;
@@ -9,7 +9,7 @@ use zsm::text::{
 
 use crate::session::SessionItem;
 use crate::state::{ActiveScreen, PluginState};
-use crate::ui::{Colors, Theme};
+use crate::ui::Theme;
 
 /// Main renderer for the plugin UI
 pub struct PluginRenderer;
@@ -32,54 +32,40 @@ impl PluginRenderer {
         if let Some(error) = state.error() {
             Self::render_error(error, x, y, width, height);
         } else if let Some(session_name) = state.session_manager().pending_deletion() {
-            Self::render_deletion_confirmation(session_name, x, y, width, height, state.colors());
+            Self::render_deletion_confirmation(state, session_name, x, y, width, height);
         }
     }
 
     /// Render the main screen with directory/session list
     fn render_main_screen(state: &PluginState, x: usize, y: usize, width: usize, height: usize) {
-        let theme = state.colors().map(Theme::new);
+        let theme = Theme;
 
         // Render title
-        let title = if let Some(theme) = &theme {
-            theme.title("Zoxide Session Manager")
-        } else {
-            Text::new("Zoxide Session Manager").color_range(2, ..)
-        };
-        print_text_with_coordinates(title, x, y, None, None);
+        print_text_with_coordinates(theme.title("Zoxide Session Manager"), x, y, None, None);
 
         // Render search indication
-        let search_term = state.search_engine().search_term();
-        let search_text = format!("Search: {}_", search_term);
-        let search_indication = if let Some(theme) = &theme {
-            theme.content(&search_text).color_range(2, ..7)
-        } else {
-            Text::new(&search_text).color_range(1, ..7)
-        };
+        let search_indication = theme.search_prompt(state.search_engine().search_term());
         print_text_with_coordinates(search_indication, x, y + 2, None, None);
 
         // Render main content
         let table_rows = height.saturating_sub(6);
         let table = if state.search_engine().is_searching() {
-            Self::render_search_results(state, table_rows, width, &theme)
+            Self::render_search_results(state, table_rows, width, theme)
         } else {
-            Self::render_all_items(state, table_rows, width, &theme)
+            Self::render_all_items(state, table_rows, width, theme)
         };
 
         if state.visible_item_count() == 0 && !state.search_engine().is_searching() {
-            let no_dirs_text = if let Some(theme) = &theme {
-                theme.warning("No zoxide directories found. Make sure zoxide is installed and you have visited some directories.")
-            } else {
-                Text::new("No zoxide directories found. Make sure zoxide is installed and you have visited some directories.")
-                    .color_range(1, ..)
-            };
+            let no_dirs_text = theme.warning(
+                "No zoxide directories found. Make sure zoxide is installed and you have visited some directories.",
+            );
             print_text_with_coordinates(no_dirs_text, x, y + 4, None, None);
         } else {
             print_table_with_coordinates(table, x, y + 4, Some(width), Some(table_rows));
         }
 
         // Render help text
-        Self::render_help_text(state, x, y + height.saturating_sub(1), &theme);
+        Self::render_help_text(state, x, y + height.saturating_sub(1), theme);
     }
 
     /// Render new session creation screen
@@ -90,13 +76,8 @@ impl PluginRenderer {
         width: usize,
         height: usize,
     ) {
-        let colors = state
-            .colors()
-            .map(Colors::new)
-            .unwrap_or_else(|| Colors::new(Palette::default()));
         crate::ui::components::render_new_session_block(
             state.new_session_info(),
-            colors,
             height.saturating_sub(2),
             width,
             x,
@@ -109,7 +90,7 @@ impl PluginRenderer {
         state: &PluginState,
         table_rows: usize,
         table_width: usize,
-        theme: &Option<Theme>,
+        theme: Theme,
     ) -> Table {
         let mut table = Table::new().add_row(vec!["Directory/Session"]);
         let results = state.search_engine().results();
@@ -143,7 +124,7 @@ impl PluginRenderer {
         state: &PluginState,
         table_rows: usize,
         table_width: usize,
-        theme: &Option<Theme>,
+        theme: Theme,
     ) -> Table {
         let mut table = Table::new().add_row(vec!["Directory/Session"]);
         let items = state.combined_items();
@@ -177,7 +158,7 @@ impl PluginRenderer {
         item: &SessionItem,
         indices: &[usize],
         max_width: usize,
-        theme: &Option<Theme>,
+        theme: Theme,
     ) -> Text {
         let text = Self::render_item(item, max_width, theme);
 
@@ -199,10 +180,7 @@ impl PluginRenderer {
             return text;
         }
 
-        match theme {
-            Some(theme) => theme.highlight(text, adjusted_indices),
-            None => text.color_indices(3, adjusted_indices),
-        }
+        theme.highlight(text, adjusted_indices)
     }
 
     /// Render a session item, shortened to `max_width` characters.
@@ -210,75 +188,57 @@ impl PluginRenderer {
     /// Directories keep their tail (the project directory is the informative
     /// part); sessions keep both ends, since the name leads and the directory
     /// trails.
-    fn render_item(item: &SessionItem, max_width: usize, theme: &Option<Theme>) -> Text {
+    fn render_item(item: &SessionItem, max_width: usize, theme: Theme) -> Text {
         let display_text = item.display_text();
 
         match item {
             SessionItem::ExistingSession { is_current, .. } => {
                 let shortened = elide_middle(&display_text, max_width);
-                match theme {
-                    Some(theme) => {
-                        if *is_current {
-                            theme.current_session(&shortened)
-                        } else {
-                            theme.available_session(&shortened)
-                        }
-                    }
-                    None => {
-                        let color = if *is_current { 2 } else { 3 };
-                        Text::new(&shortened).color_range(color, ..)
-                    }
+                if *is_current {
+                    theme.current_session(&shortened)
+                } else {
+                    theme.available_session(&shortened)
                 }
             }
             SessionItem::ResurrectableSession { .. } => {
-                let shortened = elide_middle(&display_text, max_width);
-                match theme {
-                    Some(theme) => theme.available_session(&shortened),
-                    None => Text::new(&shortened).color_range(3, ..),
-                }
+                theme.available_session(&elide_middle(&display_text, max_width))
             }
-            SessionItem::Directory { .. } => {
-                let shortened = elide_start(&display_text, max_width);
-                match theme {
-                    Some(theme) => theme.content(&shortened),
-                    None => Text::new(&shortened),
-                }
-            }
+            SessionItem::Directory { .. } => theme.content(&elide_start(&display_text, max_width)),
         }
     }
 
     /// Render help text
-    fn render_help_text(state: &PluginState, x: usize, y: usize, theme: &Option<Theme>) {
+    fn render_help_text(state: &PluginState, x: usize, y: usize, theme: Theme) {
+        // The empty list used to advertise "Type session name and press Enter",
+        // which does nothing: typing searches, and Enter with no selection is
+        // a no-op. Say what the keys actually do instead.
         let help_text = if state.visible_item_count() == 0 {
-            "Type session name and press Enter • Ctrl+Enter: Quick create • Esc: Exit"
+            if state.search_engine().is_searching() {
+                "Backspace: Edit search • Esc: Clear search"
+            } else {
+                "Ctrl+r: reload directories • Esc: Exit"
+            }
         } else {
             "↑/↓: Navigate • Enter: Switch/New • Ctrl+Enter: Quick create • Ctrl+r: reload directories • Delete: Kill • Type: Search • Esc: Exit"
         };
 
-        let text = if let Some(theme) = theme {
-            theme.content(help_text).color_range(1, ..)
-        } else {
-            Text::new(help_text).color_range(1, ..)
-        };
-
-        print_text_with_coordinates(text, x, y, None, None);
+        print_text_with_coordinates(theme.help(help_text), x, y, None, None);
     }
 
     /// Render error message
     fn render_error(error: &str, x: usize, y: usize, _width: usize, height: usize) {
         let dialog_y = y + height / 2;
-        let error_text = Text::new(error).color_range(1, ..);
-        print_text_with_coordinates(error_text, x, dialog_y, None, None);
+        print_text_with_coordinates(Theme.warning(error), x, dialog_y, None, None);
     }
 
     /// Render deletion confirmation dialog
     fn render_deletion_confirmation(
+        state: &PluginState,
         session_name: &str,
         x: usize,
         y: usize,
         width: usize,
         height: usize,
-        _colors: Option<Palette>,
     ) {
         let dialog_width = std::cmp::min(60, width.saturating_sub(4));
         let dialog_height = 6;
@@ -286,8 +246,13 @@ impl PluginRenderer {
         let dialog_y = y + (height.saturating_sub(dialog_height)) / 2;
 
         let message = format!("Kill session '{}'?", session_name);
-        let warning =
-            "If this is a resurrectable session, it will be deleted. This action cannot be undone.";
+        // Killing the session you are attached to disconnects you, which is
+        // worth saying out loud rather than leaving to the generic warning.
+        let warning = if state.is_current_session(session_name) {
+            "This is the session you are in - killing it will disconnect you."
+        } else {
+            "If this is a resurrectable session, it will be deleted. This action cannot be undone."
+        };
         let prompt = "Press 'y' to confirm, 'n' or Esc to cancel";
 
         let dialog_lines = [
@@ -312,8 +277,7 @@ impl PluginRenderer {
         ];
 
         for (i, line) in dialog_lines.iter().enumerate() {
-            let text = Text::new(line).color_range(1, ..);
-            print_text_with_coordinates(text, dialog_x, dialog_y + i, None, None);
+            print_text_with_coordinates(Theme.warning(line), dialog_x, dialog_y + i, None, None);
         }
     }
 
