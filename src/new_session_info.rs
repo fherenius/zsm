@@ -13,16 +13,11 @@ pub struct NewSessionInfo {
     pub new_session_folder: Option<PathBuf>,
 }
 
-#[derive(Eq, PartialEq)]
+#[derive(Default, Eq, PartialEq)]
 enum EnteringState {
+    #[default]
     EnteringName,
     EnteringLayoutSearch,
-}
-
-impl Default for EnteringState {
-    fn default() -> Self {
-        EnteringState::EnteringName
-    }
 }
 
 /// What pressing Enter on the new-session screen did.
@@ -117,11 +112,12 @@ impl NewSessionInfo {
             BareKey::Char('c') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
                 self.handle_break();
             }
-            BareKey::Char('r') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
+            BareKey::Char('r')
+                if key.has_modifiers(&[KeyModifier::Ctrl])
                 // Ctrl+R to correct session name - only when in layout search mode
-                if self.entering_new_session_info == EnteringState::EnteringLayoutSearch {
-                    self.correct_session_name();
-                }
+                && self.entering_new_session_info == EnteringState::EnteringLayoutSearch =>
+            {
+                self.correct_session_name();
             }
             BareKey::Esc if key.has_no_modifiers() => {
                 // Esc goes back to previous state or clears current input
@@ -168,7 +164,7 @@ impl NewSessionInfo {
             self.layout_list
                 .layout_list
                 .iter()
-                .find(|layout| &layout.name() == layout_name)
+                .find(|layout| layout.name() == layout_name)
                 .cloned()
         });
 
@@ -297,7 +293,7 @@ impl NewSessionInfo {
             let matcher = SkimMatcherV2::default().use_cache(true);
             for layout_info in &self.layout_list.layout_list {
                 if let Some((score, indices)) =
-                    matcher.fuzzy_indices(&layout_info.name(), &self.layout_list.layout_search_term)
+                    matcher.fuzzy_indices(layout_info.name(), &self.layout_list.layout_search_term)
                 {
                     matches.push(LayoutSearchResult {
                         layout_info: layout_info.clone(),
@@ -306,7 +302,7 @@ impl NewSessionInfo {
                     });
                 }
             }
-            matches.sort_by(|a, b| b.score.cmp(&a.score));
+            matches.sort_by_key(|result| std::cmp::Reverse(result.score));
             self.layout_list.layout_search_results = matches;
             self.layout_list.clear_selection();
         }

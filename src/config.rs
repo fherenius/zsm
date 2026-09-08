@@ -46,7 +46,7 @@ impl Config {
                         .filter(|p| !p.is_empty())
                         .collect()
                 })
-                .unwrap_or_else(Vec::new),
+                .unwrap_or_default(),
         }
     }
 }

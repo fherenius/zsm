@@ -10,6 +10,7 @@ use crate::session::{SessionAction, SessionItem, SessionManager};
 use crate::zoxide::{SearchEngine, ZoxideDirectory};
 
 /// The main plugin state
+#[derive(Default)]
 pub struct PluginState {
     /// Plugin configuration
     config: Config,
@@ -43,37 +44,13 @@ pub struct PluginState {
 }
 
 /// Represents the different screens in the plugin
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum ActiveScreen {
     /// Main screen showing zoxide directories and sessions
+    #[default]
     Main,
     /// New session creation screen
     NewSession,
-}
-
-impl Default for ActiveScreen {
-    fn default() -> Self {
-        ActiveScreen::Main
-    }
-}
-
-impl Default for PluginState {
-    fn default() -> Self {
-        Self {
-            config: Config::default(),
-            session_manager: SessionManager::default(),
-            zoxide_directories: Vec::new(),
-            search_engine: SearchEngine::default(),
-            new_session_info: NewSessionInfo::default(),
-            active_screen: ActiveScreen::default(),
-            error: None,
-            colors: None,
-            current_session_name: None,
-            request_ids: Vec::new(),
-            selected_index: None,
-            combined_items: Vec::new(),
-        }
-    }
 }
 
 impl PluginState {

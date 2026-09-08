@@ -74,20 +74,20 @@ impl ZellijPlugin for PluginState {
                 self.update_resurrectable_sessions(resurrectable_session_infos);
                 should_render = true;
             }
-            Event::RunCommandResult(exit_code, stdout, stderr, context) => {
-                if context.contains_key("zoxide_query") {
-                    if exit_code == Some(0) {
-                        let stdout_str = String::from_utf8_lossy(&stdout);
-                        self.process_zoxide_output(&stdout_str);
-                        should_render = true;
-                    } else {
-                        let stderr_str = String::from_utf8_lossy(&stderr);
-                        self.set_error(format!(
-                            "Failed to run zoxide (is it installed?): {}",
-                            stderr_str
-                        ));
-                        should_render = true;
-                    }
+            Event::RunCommandResult(exit_code, stdout, stderr, context)
+                if context.contains_key("zoxide_query") =>
+            {
+                if exit_code == Some(0) {
+                    let stdout_str = String::from_utf8_lossy(&stdout);
+                    self.process_zoxide_output(&stdout_str);
+                    should_render = true;
+                } else {
+                    let stderr_str = String::from_utf8_lossy(&stderr);
+                    self.set_error(format!(
+                        "Failed to run zoxide (is it installed?): {}",
+                        stderr_str
+                    ));
+                    should_render = true;
                 }
             }
             Event::Visible(true) => {

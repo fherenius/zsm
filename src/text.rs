@@ -180,8 +180,8 @@ mod tests {
             for text in [cyrillic, cjk, emoji] {
                 let start = elide_start(text, width);
                 let middle = elide_middle(text, width);
-                assert!(char_count(&start) <= width.max(0), "{text} @ {width}");
-                assert!(char_count(&middle) <= width.max(0), "{text} @ {width}");
+                assert!(char_count(&start) <= width, "{text} @ {width}");
+                assert!(char_count(&middle) <= width, "{text} @ {width}");
                 assert!(truncate_chars(text, width).chars().count() <= width);
             }
         }
@@ -242,12 +242,12 @@ mod tests {
         for width in 0..50 {
             let shortened = elide_middle(row, width);
             let rendered: Vec<char> = shortened.chars().collect();
-            for original in 0..source.len() {
+            for (original, expected) in source.iter().enumerate() {
                 let mapped = remap_indices_after_elide_middle(row, width, &[original]);
                 if let Some(&slot) = mapped.first() {
                     assert!(slot < rendered.len(), "width {width}: {slot} out of range");
                     assert_eq!(
-                        rendered[slot], source[original],
+                        rendered[slot], *expected,
                         "width {width}: index {original} mapped to {slot}"
                     );
                 }
