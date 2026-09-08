@@ -336,8 +336,9 @@ impl PluginState {
                 // made the layout step unreachable.
                 match self
                     .new_session_info
-                    .handle_selection(&self.current_session_name)
-                {
+                    .handle_selection(&self.current_session_name, |name| {
+                        self.session_manager.name_taken(name)
+                    }) {
                     SelectionOutcome::AdvancedToLayout => {}
                     SelectionOutcome::Created => self.active_screen = ActiveScreen::Main,
                     SelectionOutcome::Rejected(message) => self.set_error(message.to_string()),
@@ -349,6 +350,7 @@ impl PluginState {
                 match self.new_session_info.handle_quick_session_creation(
                     &self.current_session_name,
                     &self.config.default_layout,
+                    |name| self.session_manager.name_taken(name),
                 ) {
                     Ok(()) => self.active_screen = ActiveScreen::Main,
                     Err(message) => self.set_error(message.to_string()),

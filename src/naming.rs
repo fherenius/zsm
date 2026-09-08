@@ -15,10 +15,10 @@ use crate::text;
 
 /// Character budget for a generated name.
 ///
-/// Zellij session names live inside a Unix-domain-socket path capped at 108
-/// bytes, and the socket directory is not knowable from inside the WASM
-/// sandbox. Generated names therefore aim well below the hard cap; see
-/// [`MAX_SESSION_NAME_BYTES`] for the limit that is actually enforced.
+/// Zellij session names live inside a platform-dependent Unix-domain-socket
+/// path, and the socket directory is not knowable from inside the WASM sandbox.
+/// Generated names therefore aim for the conservative byte budget enforced by
+/// [`MAX_SESSION_NAME_BYTES`].
 pub const MAX_GENERATED_NAME_LEN: usize = 29;
 
 /// Leading segments a directory nested inside another one starts with.
@@ -282,16 +282,16 @@ fn width(segments: &[String], separator: &str) -> usize {
     segments.join(separator).chars().count()
 }
 
-/// Keep a name inside the byte limit the socket path actually imposes.
+/// Keep a name inside the conservative byte budget for the socket name.
 ///
 /// The character budget above is the design target; this is the backstop for
-/// multi-byte names, where 29 characters can still exceed 108 bytes.
+/// multi-byte names, where 29 characters can exceed 29 bytes.
 fn within_hard_limit(name: String) -> String {
-    if name.len() < MAX_SESSION_NAME_BYTES {
+    if name.len() <= MAX_SESSION_NAME_BYTES {
         return name;
     }
 
-    text::truncate_bytes(&name, MAX_SESSION_NAME_BYTES - 1)
+    text::truncate_bytes(&name, MAX_SESSION_NAME_BYTES)
 }
 
 #[cfg(test)]
@@ -460,7 +460,7 @@ mod tests {
 
         for name in session_names(&paths, &plain()) {
             assert!(
-                name.len() < MAX_SESSION_NAME_BYTES,
+                name.len() <= MAX_SESSION_NAME_BYTES,
                 "{name:?} too many bytes"
             );
             assert!(session_name::validate(&name).is_ok(), "{name:?} invalid");

@@ -91,7 +91,7 @@ impl SessionManager {
     }
 
     /// Whether a session of this name exists, live or resurrectable.
-    fn name_taken(&self, name: &str) -> bool {
+    pub fn name_taken(&self, name: &str) -> bool {
         self.sessions.iter().any(|session| session.name == name)
             || self
                 .resurrectable_sessions
@@ -103,12 +103,11 @@ impl SessionManager {
     pub fn generate_incremented_name(&self, base_name: &str, separator: &str) -> String {
         session_name::first_free_increment(base_name, separator, |name| self.name_taken(name))
             .unwrap_or_else(|| {
-                format!(
-                    "{}{}{}",
-                    base_name,
-                    separator,
-                    &uuid::Uuid::new_v4().to_string()[..8]
-                )
+                let unique_suffix = uuid::Uuid::new_v4().to_string();
+                session_name::with_suffix(base_name, separator, &unique_suffix[..8])
+                    // A separator can itself be invalid or larger than the
+                    // budget. The UUID fragment remains a safe name on its own.
+                    .unwrap_or_else(|| unique_suffix[..8].to_string())
             })
     }
 }

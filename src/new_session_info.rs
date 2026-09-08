@@ -157,8 +157,13 @@ impl NewSessionInfo {
         &mut self,
         current_session_name: &Option<String>,
         default_layout: &Option<String>,
+        is_name_taken: impl FnOnce(&str) -> bool,
     ) -> Result<(), &'static str> {
-        session_name::validate_against_current(&self.name, current_session_name.as_deref())?;
+        session_name::validate_for_creation(
+            &self.name,
+            current_session_name.as_deref(),
+            is_name_taken,
+        )?;
 
         let layout = default_layout.as_ref().and_then(|layout_name| {
             self.layout_list
@@ -199,10 +204,16 @@ impl NewSessionInfo {
     /// The name is validated on the way out of the name field as well as at
     /// creation, so a name that cannot work is reported while the user is
     /// still looking at it.
-    pub fn handle_selection(&mut self, current_session_name: &Option<String>) -> SelectionOutcome {
-        if let Err(message) =
-            session_name::validate_against_current(&self.name, current_session_name.as_deref())
-        {
+    pub fn handle_selection(
+        &mut self,
+        current_session_name: &Option<String>,
+        is_name_taken: impl FnOnce(&str) -> bool,
+    ) -> SelectionOutcome {
+        if let Err(message) = session_name::validate_for_creation(
+            &self.name,
+            current_session_name.as_deref(),
+            is_name_taken,
+        ) {
             return SelectionOutcome::Rejected(message);
         }
 
