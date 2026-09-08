@@ -26,7 +26,8 @@ ZSM bridges the gap between `zoxide` and Zellij's session management:
 
 ```bash
 mkdir -p ~/.config/zellij/plugins
-curl -sSL -o ~/.config/zellij/plugins https://github.com/liam-mackie/zsm/releases/download/v0.1.0/zsm.wasm
+curl -sSL -o ~/.config/zellij/plugins/zsm.wasm \
+  https://github.com/liam-mackie/zsm/releases/latest/download/zsm.wasm
 ```
 
 ### Option 2: Build from Source
@@ -202,4 +203,3 @@ Contributions welcome, though my time is limited so please be patient with revie
 ---
 
 **Made with ❤️ for the Zellij community**
-
