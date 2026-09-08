@@ -2515,5 +2515,4 @@ dependencies = [
  "serde",
  "uuid",
  "zellij-tile",
- "zellij-utils",
 ]
