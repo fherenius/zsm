@@ -57,9 +57,8 @@ impl NewSessionInfo {
 
     pub fn correct_session_name(&mut self) {
         // Go back to session name entry from layout selection
-        self.layout_list.layout_search_term.clear();
+        self.layout_list.clear_search();
         self.entering_new_session_info = EnteringState::EnteringName;
-        self.update_layout_search_term();
     }
     pub fn layout_search_term(&self) -> &str {
         &self.layout_list.layout_search_term
@@ -98,9 +97,8 @@ impl NewSessionInfo {
                 self.name.clear();
             }
             EnteringState::EnteringLayoutSearch => {
-                self.layout_list.layout_search_term.clear();
+                self.layout_list.clear_search();
                 self.entering_new_session_info = EnteringState::EnteringName;
-                self.update_layout_search_term();
             }
         }
     }
@@ -125,8 +123,7 @@ impl NewSessionInfo {
                     EnteringState::EnteringLayoutSearch => {
                         // In layout search, if there's a search term, clear it; otherwise go back to name entry
                         if !self.layout_list.layout_search_term.is_empty() {
-                            self.layout_list.layout_search_term.clear();
-                            self.update_layout_search_term();
+                            self.layout_list.clear_search();
                         } else {
                             // No search term, go back to name entry
                             self.entering_new_session_info = EnteringState::EnteringName;
@@ -193,9 +190,17 @@ impl NewSessionInfo {
             None => switch_session_with_cwd(new_session_name, cwd),
         }
 
-        self.name.clear();
-        self.layout_list.clear_selection();
+        self.reset_after_creation();
         hide_self();
+    }
+
+    /// Return the form to its initial state while retaining the layouts fetched
+    /// from Zellij for the next use.
+    fn reset_after_creation(&mut self) {
+        self.name.clear();
+        self.new_session_folder = None;
+        self.entering_new_session_info = EnteringState::EnteringName;
+        self.layout_list.clear_search();
     }
 
     /// Advance the screen: name field to layout picker, layout picker to
@@ -297,8 +302,7 @@ impl NewSessionInfo {
     }
     fn update_layout_search_term(&mut self) {
         if self.layout_list.layout_search_term.is_empty() {
-            self.layout_list.clear_selection();
-            self.layout_list.layout_search_results = vec![];
+            self.layout_list.clear_search();
         } else {
             let mut matches = vec![];
             let matcher = SkimMatcherV2::default().use_cache(true);
@@ -354,6 +358,11 @@ impl LayoutList {
     }
     pub fn clear_selection(&mut self) {
         self.selected_layout_index = 0;
+    }
+    fn clear_search(&mut self) {
+        self.layout_search_term.clear();
+        self.layout_search_results.clear();
+        self.clear_selection();
     }
     fn max_index(&self) -> usize {
         if self.layout_search_term.is_empty() {
