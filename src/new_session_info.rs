@@ -3,6 +3,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
 use zsm::list::visible_range;
+use zsm::session_name;
 
 #[derive(Default)]
 pub struct NewSessionInfo {
@@ -22,6 +23,20 @@ impl Default for EnteringState {
     fn default() -> Self {
         EnteringState::EnteringName
     }
+}
+
+/// What pressing Enter on the new-session screen did.
+///
+/// The caller needs to tell "moved to the next field" apart from "finished",
+/// otherwise it cannot know whether to leave the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionOutcome {
+    /// Moved from the name field to the layout picker; stay on this screen.
+    AdvancedToLayout,
+    /// A session was requested; leave this screen.
+    Created,
+    /// The name cannot be used; show this message instead.
+    Rejected(&'static str),
 }
 
 impl NewSessionInfo {
@@ -140,46 +155,41 @@ impl NewSessionInfo {
         }
     }
 
+    /// Create the session straight away, using `default_layout` if it names a
+    /// layout this session knows about.
     pub fn handle_quick_session_creation(
         &mut self,
         current_session_name: &Option<String>,
         default_layout: &Option<String>,
-    ) {
+    ) -> Result<(), &'static str> {
+        session_name::validate_against_current(&self.name, current_session_name.as_deref())?;
+
+        let layout = default_layout.as_ref().and_then(|layout_name| {
+            self.layout_list
+                .layout_list
+                .iter()
+                .find(|layout| &layout.name() == layout_name)
+                .cloned()
+        });
+
+        self.switch_to_new_session(layout);
+        Ok(())
+    }
+
+    /// Ask Zellij for the session currently described by this screen.
+    ///
+    /// An empty name means "pick a random one", which Zellij does for `None`.
+    fn switch_to_new_session(&mut self, layout: Option<LayoutInfo>) {
         let new_session_name = if self.name.is_empty() {
             None
         } else {
             Some(self.name.as_str())
         };
+        let cwd = self.new_session_folder.clone();
 
-        if new_session_name != current_session_name.as_ref().map(|s| s.as_str()) {
-            match default_layout {
-                Some(layout_name) => {
-                    // Find the layout by name
-                    let layout_info = self
-                        .layout_list
-                        .layout_list
-                        .iter()
-                        .find(|layout| layout.name() == layout_name)
-                        .cloned();
-
-                    match layout_info {
-                        Some(layout) => {
-                            let cwd = self.new_session_folder.as_ref().map(|c| PathBuf::from(c));
-                            switch_session_with_layout(new_session_name, layout, cwd);
-                        }
-                        None => {
-                            // Default layout not found, create without layout but with folder
-                            let cwd = self.new_session_folder.as_ref().map(|c| PathBuf::from(c));
-                            switch_session_with_cwd(new_session_name, cwd);
-                        }
-                    }
-                }
-                None => {
-                    // No default layout configured, create without layout but with folder
-                    let cwd = self.new_session_folder.as_ref().map(|c| PathBuf::from(c));
-                    switch_session_with_cwd(new_session_name, cwd);
-                }
-            }
+        match layout {
+            Some(layout) => switch_session_with_layout(new_session_name, layout, cwd),
+            None => switch_session_with_cwd(new_session_name, cwd),
         }
 
         self.name.clear();
@@ -187,33 +197,28 @@ impl NewSessionInfo {
         hide_self();
     }
 
-    pub fn handle_selection(&mut self, current_session_name: &Option<String>) {
+    /// Advance the screen: name field to layout picker, layout picker to
+    /// creating the session.
+    ///
+    /// The name is validated on the way out of the name field as well as at
+    /// creation, so a name that cannot work is reported while the user is
+    /// still looking at it.
+    pub fn handle_selection(&mut self, current_session_name: &Option<String>) -> SelectionOutcome {
+        if let Err(message) =
+            session_name::validate_against_current(&self.name, current_session_name.as_deref())
+        {
+            return SelectionOutcome::Rejected(message);
+        }
+
         match self.entering_new_session_info {
             EnteringState::EnteringLayoutSearch => {
-                let new_session_layout: Option<LayoutInfo> = self.selected_layout_info();
-                let new_session_name = if self.name.is_empty() {
-                    None
-                } else {
-                    Some(self.name.as_str())
-                };
-                if new_session_name != current_session_name.as_ref().map(|s| s.as_str()) {
-                    match new_session_layout {
-                        Some(new_session_layout) => {
-                            let cwd = self.new_session_folder.as_ref().map(|c| PathBuf::from(c));
-                            switch_session_with_layout(new_session_name, new_session_layout, cwd)
-                        }
-                        None => {
-                            let cwd = self.new_session_folder.as_ref().map(|c| PathBuf::from(c));
-                            switch_session_with_cwd(new_session_name, cwd);
-                        }
-                    }
-                }
-                self.name.clear();
-                self.layout_list.clear_selection();
-                hide_self();
+                let layout = self.selected_layout_info();
+                self.switch_to_new_session(layout);
+                SelectionOutcome::Created
             }
             EnteringState::EnteringName => {
                 self.entering_new_session_info = EnteringState::EnteringLayoutSearch;
+                SelectionOutcome::AdvancedToLayout
             }
         }
     }

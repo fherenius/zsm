@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use zellij_tile::prelude::*;
 use zsm::list;
+use zsm::session_name;
 
 use crate::config::Config;
-use crate::new_session_info::NewSessionInfo;
+use crate::new_session_info::{NewSessionInfo, SelectionOutcome};
 use crate::session::{SessionAction, SessionItem, SessionManager};
 use crate::zoxide::{SearchEngine, ZoxideDirectory};
 
@@ -356,24 +357,28 @@ impl PluginState {
     fn handle_new_session_key(&mut self, key: KeyWithModifier) -> bool {
         match key.bare_key {
             BareKey::Enter if key.has_no_modifiers() => {
-                // Handle session creation
-                self.new_session_info
-                    .handle_selection(&self.current_session_name);
-                self.active_screen = ActiveScreen::Main;
+                // Only leave the screen once a session was actually requested.
+                // Enter in the name field just moves on to the layout picker;
+                // returning to the main screen there threw the name away and
+                // made the layout step unreachable.
+                match self
+                    .new_session_info
+                    .handle_selection(&self.current_session_name)
+                {
+                    SelectionOutcome::AdvancedToLayout => {}
+                    SelectionOutcome::Created => self.active_screen = ActiveScreen::Main,
+                    SelectionOutcome::Rejected(message) => self.set_error(message.to_string()),
+                }
                 true
             }
             BareKey::Enter if key.has_modifiers(&[KeyModifier::Ctrl]) => {
                 // Quick session creation with default layout
-                if self.new_session_info.name().len() >= 108 {
-                    self.set_error("Session name must be shorter than 108 bytes".to_string());
-                } else if self.new_session_info.name().contains('/') {
-                    self.set_error("Session name cannot contain '/'".to_string());
-                } else {
-                    self.new_session_info.handle_quick_session_creation(
-                        &self.current_session_name,
-                        &self.config.default_layout,
-                    );
-                    self.active_screen = ActiveScreen::Main;
+                match self.new_session_info.handle_quick_session_creation(
+                    &self.current_session_name,
+                    &self.config.default_layout,
+                ) {
+                    Ok(()) => self.active_screen = ActiveScreen::Main,
+                    Err(message) => self.set_error(message.to_string()),
                 }
                 true
             }
@@ -556,7 +561,7 @@ impl PluginState {
         use zellij_tile::prelude::{switch_session_with_cwd, switch_session_with_layout};
 
         // Get the selected item data or search term
-        let (session_name, session_folder) = if let Some(selected_item) = self.selected_item() {
+        let (new_session_name, session_folder) = if let Some(selected_item) = self.selected_item() {
             match selected_item {
                 SessionItem::ExistingSession { name, .. } => {
                     // Switch to existing session
@@ -583,19 +588,11 @@ impl PluginState {
             return;
         };
 
-        // Validate session name
-        if session_name.len() >= 108 {
-            self.set_error("Session name must be shorter than 108 bytes".to_string());
-            return;
-        }
-        if session_name.contains('/') {
-            self.set_error("Session name cannot contain '/'".to_string());
-            return;
-        }
-
-        // Check if session name is different from current session
-        if Some(&session_name) == self.current_session_name.as_ref() {
-            self.set_error("Cannot create session with same name as current session".to_string());
+        if let Err(message) = session_name::validate_against_current(
+            &new_session_name,
+            self.current_session_name.as_deref(),
+        ) {
+            self.set_error(message.to_string());
             return;
         }
 
@@ -617,21 +614,25 @@ impl PluginState {
 
                     match layout_info {
                         Some(layout) => {
-                            switch_session_with_layout(Some(&session_name), layout, session_folder);
+                            switch_session_with_layout(
+                                Some(&new_session_name),
+                                layout,
+                                session_folder,
+                            );
                         }
                         None => {
                             // Defined layout not found, create without layout
-                            switch_session_with_cwd(Some(&session_name), session_folder);
+                            switch_session_with_cwd(Some(&new_session_name), session_folder);
                         }
                     }
                 } else {
                     // No current session info, cannot retrieve layouts, create without layout
-                    switch_session_with_cwd(Some(&session_name), session_folder);
+                    switch_session_with_cwd(Some(&new_session_name), session_folder);
                 }
             }
             None => {
                 // No default layout configured, create without layout
-                switch_session_with_cwd(Some(&session_name), session_folder);
+                switch_session_with_cwd(Some(&new_session_name), session_folder);
             }
         }
 

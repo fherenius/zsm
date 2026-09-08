@@ -6,4 +6,5 @@
 //! `cargo test --lib --target <host-triple>`.
 
 pub mod list;
+pub mod session_name;
 pub mod text;
