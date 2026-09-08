@@ -47,15 +47,7 @@ pub fn session_names(paths: &[&str], config: &Config) -> Vec<String> {
     }
 
     let mut names = vec![String::new(); paths.len()];
-    for (basename, indices) in basename_groups {
-        // A lone, un-nested directory with a usable basename needs no context.
-        if let [only] = indices[..] {
-            if !nested[only] && !basename.is_empty() {
-                names[only] = basename.to_string();
-                continue;
-            }
-        }
-
+    for indices in basename_groups.into_values() {
         for &index in &indices {
             names[index] = context_aware_name(index, &normalized, &indices, nested[index], config);
         }
@@ -323,6 +315,17 @@ mod tests {
     fn a_unique_basename_names_the_session_on_its_own() {
         let names = session_names(&["/home/user/zsm", "/home/user/other"], &plain());
         assert_eq!(names, vec!["zsm", "other"]);
+    }
+
+    #[test]
+    fn a_unique_long_basename_is_shortened() {
+        let basename = "a".repeat(120);
+        let path = format!("/home/user/{basename}");
+        let names = session_names(&[&path], &plain());
+
+        assert_eq!(names.len(), 1);
+        assert!(names[0].chars().count() <= MAX_GENERATED_NAME_LEN);
+        assert!(session_name::validate(&names[0]).is_ok());
     }
 
     #[test]
