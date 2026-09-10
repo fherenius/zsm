@@ -4,6 +4,7 @@ use zellij_tile::prelude::*;
 use zsm::config::Config;
 use zsm::list;
 use zsm::session_name;
+use zsm::session_usage::SessionUsage;
 
 use crate::new_session_info::{NewSessionInfo, SelectionOutcome};
 use crate::session::{SessionAction, SessionItem, SessionManager};
@@ -12,6 +13,10 @@ use crate::zoxide::{SearchEngine, ZoxideDirectory};
 /// The main plugin state
 #[derive(Default)]
 pub struct PluginState {
+    pub(crate) permissions_granted: bool,
+    pub(crate) is_visible: bool,
+    pub(crate) refresh_timer_pending: bool,
+    session_usage: SessionUsage,
     /// Plugin configuration
     config: Config,
     /// Session manager
@@ -58,9 +63,9 @@ impl PluginState {
     }
 
     /// Update session information
-    pub fn update_sessions(&mut self, sessions: Vec<SessionInfo>) {
+    fn update_current_session_info(&mut self, sessions: &[SessionInfo]) {
         // Store current session name
-        for session in &sessions {
+        for session in sessions {
             if session.is_current_session {
                 self.current_session_name = Some(session.name.clone());
                 self.new_session_info
@@ -68,19 +73,84 @@ impl PluginState {
                 break;
             }
         }
-
-        self.session_manager.update_sessions(sessions);
-        self.rebuild_combined_items();
     }
 
-    /// Update session information for resurrectable sessions
-    pub fn update_resurrectable_sessions(
+    /// Apply a complete snapshot atomically, including removals.
+    pub fn update_session_list(
         &mut self,
+        sessions: Vec<SessionInfo>,
         resurrectable_sessions: Vec<(String, Duration)>,
     ) {
+        self.update_current_session_info(&sessions);
+        self.session_manager.update_sessions(sessions);
         self.session_manager
             .update_resurrectable_sessions(resurrectable_sessions);
         self.rebuild_combined_items();
+    }
+
+    pub fn update_session_notification(&mut self, sessions: Vec<SessionInfo>) {
+        self.update_current_session_info(&sessions);
+        self.session_manager.update_current_session(sessions);
+        self.rebuild_combined_items();
+    }
+
+    /// Reset the picker on a visibility transition, preserving a filepicker's
+    /// in-progress new-session form when focus returns from that plugin.
+    pub fn set_visible(&mut self, visible: bool) {
+        if visible && !self.is_visible {
+            self.search_engine.clear();
+            self.selected_index = None;
+            self.error = None;
+            self.session_manager.cancel_deletion();
+        }
+        self.is_visible = visible;
+    }
+
+    pub fn update_session_usage(&mut self, history: &str) {
+        self.session_usage.merge(history);
+        self.rebuild_combined_items();
+    }
+
+    /// Record the source and destination before switching; this also covers
+    /// sessions where ZSM has not been opened yet.
+    fn record_session_visit(&mut self, destination: Option<&str>) {
+        if !self.permissions_granted {
+            return;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let mut records = Vec::new();
+        if let Some(name) = &self.current_session_name {
+            records.push(self.session_usage.record(name, now));
+        }
+        if let Some(name) = destination.filter(|name| !name.is_empty()) {
+            records.push(self.session_usage.record(name, now.saturating_add(1)));
+        }
+        let mut command = vec![
+            "sh",
+            "-c",
+            include_str!("session/usage.sh"),
+            "zsm-session-usage",
+        ];
+        command.extend(records.iter().map(String::as_str));
+        run_command(
+            &command,
+            BTreeMap::from([("session_usage".into(), "true".into())]),
+        );
+        self.rebuild_combined_items();
+    }
+
+    pub fn refresh_session_usage(&mut self) {
+        self.record_session_visit(None);
+    }
+
+    fn hide_picker(&mut self) {
+        // Mark this immediately, even if the host's Visible(false) notification
+        // is delayed, so the next open always starts with an empty search.
+        self.set_visible(false);
+        hide_self();
     }
 
     /// Update zoxide directories (managed separately from sessions)
@@ -135,7 +205,19 @@ impl PluginState {
     /// Rebuild the cached item list, then bring the search and selection back
     /// in line with it.
     fn rebuild_combined_items(&mut self) {
+        let selected = self.selected_item();
         self.combined_items = self.build_combined_items();
+        if !self.search_engine.is_searching() {
+            if let Some(selected) = selected {
+                if let Some(index) = self
+                    .combined_items
+                    .iter()
+                    .position(|item| item.same_identity(&selected))
+                {
+                    self.selected_index = Some(index);
+                }
+            }
+        }
         self.update_search_if_needed();
         self.clamp_selection();
     }
@@ -172,12 +254,27 @@ impl PluginState {
         // regardless of whether they map to a zoxide directory.
         if self.config.show_resurrectable_sessions {
             for (name, duration) in self.session_manager.resurrectable_sessions() {
+                if self
+                    .session_manager
+                    .sessions()
+                    .iter()
+                    .any(|session| &session.name == name)
+                {
+                    continue;
+                }
                 items.push(SessionItem::ResurrectableSession {
                     name: name.clone(),
                     duration: *duration,
                 });
             }
         }
+
+        items.sort_by(|a, b| {
+            self.session_usage.compare(
+                a.session_name().unwrap_or_default(),
+                b.session_name().unwrap_or_default(),
+            )
+        });
 
         // Then add all zoxide directories (always show directories, even if sessions exist)
         for dir in &self.zoxide_directories {
@@ -308,18 +405,19 @@ impl PluginState {
                     self.search_engine.clear();
                     true
                 } else {
-                    hide_self();
+                    self.hide_picker();
                     false
                 }
             }
             BareKey::Char('c') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
-                hide_self();
+                self.hide_picker();
                 false
             }
             BareKey::Char('r') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
                 // reload zoxide directories and re-pull the session list
                 self.fetch_zoxide_directories();
                 self.fetch_sessions();
+                self.refresh_session_usage();
                 true
             }
             _ => false,
@@ -330,6 +428,7 @@ impl PluginState {
     fn handle_new_session_key(&mut self, key: KeyWithModifier) -> bool {
         match key.bare_key {
             BareKey::Enter if key.has_no_modifiers() => {
+                let name = self.new_session_info.name().to_owned();
                 // Only leave the screen once a session was actually requested.
                 // Enter in the name field just moves on to the layout picker;
                 // returning to the main screen there threw the name away and
@@ -340,19 +439,28 @@ impl PluginState {
                         self.session_manager.name_taken(name)
                     }) {
                     SelectionOutcome::AdvancedToLayout => {}
-                    SelectionOutcome::Created => self.active_screen = ActiveScreen::Main,
+                    SelectionOutcome::Created => {
+                        self.record_session_visit(Some(&name));
+                        self.active_screen = ActiveScreen::Main;
+                        self.set_visible(false);
+                    }
                     SelectionOutcome::Rejected(message) => self.set_error(message.to_string()),
                 }
                 true
             }
             BareKey::Enter if key.has_modifiers(&[KeyModifier::Ctrl]) => {
+                let name = self.new_session_info.name().to_owned();
                 // Quick session creation with default layout
                 match self.new_session_info.handle_quick_session_creation(
                     &self.current_session_name,
                     &self.config.default_layout,
                     |name| self.session_manager.name_taken(name),
                 ) {
-                    Ok(()) => self.active_screen = ActiveScreen::Main,
+                    Ok(()) => {
+                        self.record_session_visit(Some(&name));
+                        self.active_screen = ActiveScreen::Main;
+                        self.set_visible(false);
+                    }
                     Err(message) => self.set_error(message.to_string()),
                 }
                 true
@@ -440,11 +548,12 @@ impl PluginState {
 
         if let Some((is_session, name, path)) = selected_item_data {
             if is_session {
+                self.record_session_visit(Some(&name));
                 // Switch to existing session (infallible)
                 let _ = self
                     .session_manager
                     .execute_action(SessionAction::Switch(name));
-                hide_self();
+                self.hide_picker();
             } else {
                 // Create new session with incremented name
                 let incremented_name = self
@@ -541,14 +650,16 @@ impl PluginState {
         let (new_session_name, session_folder) = if let Some(selected_item) = self.selected_item() {
             match selected_item {
                 SessionItem::ExistingSession { name, .. } => {
+                    self.record_session_visit(Some(&name));
                     // Switch to existing session
                     switch_session_with_cwd(Some(&name), None);
-                    hide_self();
+                    self.hide_picker();
                     return;
                 }
                 SessionItem::ResurrectableSession { name, .. } => {
+                    self.record_session_visit(Some(&name));
                     switch_session_with_cwd(Some(&name), None);
-                    hide_self();
+                    self.hide_picker();
                     return;
                 }
                 SessionItem::Directory {
@@ -574,6 +685,7 @@ impl PluginState {
         }
 
         // Create session with default layout if configured
+        self.record_session_visit(Some(&new_session_name));
         match &self.config.default_layout {
             Some(layout_name) => {
                 // Find the layout by name from current session's available layouts
@@ -613,6 +725,144 @@ impl PluginState {
             }
         }
 
-        hide_self();
+        self.hide_picker();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(name: &str, current: bool) -> SessionInfo {
+        SessionInfo {
+            name: name.into(),
+            is_current_session: current,
+            ..Default::default()
+        }
+    }
+
+    fn names(state: &PluginState) -> Vec<&str> {
+        state
+            .combined_items()
+            .iter()
+            .filter_map(SessionItem::session_name)
+            .collect()
+    }
+
+    #[test]
+    fn stale_notifications_cannot_hide_peers_or_restore_removed_sessions() {
+        let mut state = PluginState::default();
+        state.config.show_resurrectable_sessions = true;
+        state.update_session_list(
+            vec![session("current", true), session("peer", false)],
+            vec![("dead".into(), Duration::from_secs(10))],
+        );
+        state.update_session_notification(vec![session("current", true)]);
+        assert_eq!(names(&state), ["current", "dead", "peer"]);
+
+        state.update_session_list(vec![session("current", true)], vec![]);
+        state.update_session_notification(vec![session("current", true), session("peer", false)]);
+        assert_eq!(names(&state), ["current"]);
+    }
+
+    #[test]
+    fn sessions_are_visible_without_zoxide_matches_and_live_entries_are_unique() {
+        let mut state = PluginState::default();
+        state.config.show_resurrectable_sessions = true;
+        state.update_zoxide_directories(vec![ZoxideDirectory {
+            directory: "/work/project".into(),
+            session_name: "project".into(),
+            ranking: 100.0,
+        }]);
+        state.update_session_list(
+            vec![
+                session("random-name", true),
+                session("old-config-name", false),
+            ],
+            vec![
+                ("random-name".into(), Duration::ZERO),
+                ("dead".into(), Duration::ZERO),
+            ],
+        );
+        assert_eq!(names(&state), ["dead", "old-config-name", "random-name"]);
+        assert!(matches!(
+            state.combined_items().last(),
+            Some(SessionItem::Directory { .. })
+        ));
+    }
+
+    #[test]
+    fn reopening_clears_search_results_selection_and_pending_dialogs() {
+        let mut state = PluginState::default();
+        state.update_session_list(vec![session("alpha", true), session("beta", false)], vec![]);
+        state.set_visible(true);
+        state
+            .search_engine
+            .update_search("alpha".into(), &state.combined_items);
+        state.selected_index = Some(1);
+        state.error = Some("old error".into());
+        state.session_manager.start_deletion("alpha".into());
+        state.set_visible(false);
+        state.set_visible(true);
+        assert_eq!(state.search_engine.search_term(), "");
+        assert!(!state.search_engine.is_searching());
+        assert!(state.search_engine.results().is_empty());
+        assert_eq!(state.selected_index(), None);
+        assert_eq!(state.visible_item_count(), 2);
+        assert!(state.error().is_none());
+        assert!(state.session_manager.pending_deletion().is_none());
+    }
+
+    #[test]
+    fn refreshes_and_repeated_visible_events_preserve_an_active_search() {
+        let mut state = PluginState::default();
+        state.set_visible(true);
+        state.update_session_list(vec![session("alpha", true)], vec![]);
+        state
+            .search_engine
+            .update_search("beta".into(), &state.combined_items);
+        assert_eq!(state.visible_item_count(), 0);
+        state.update_session_list(vec![session("alpha", true), session("beta", false)], vec![]);
+        state.set_visible(true);
+        assert_eq!(state.search_engine.search_term(), "beta");
+        assert_eq!(state.visible_item_count(), 1);
+        assert_eq!(state.selected_item().unwrap().session_name(), Some("beta"));
+    }
+
+    #[test]
+    fn recency_refresh_keeps_the_selected_session_and_sessions_before_directories() {
+        let mut state = PluginState::default();
+        state.update_session_list(vec![session("alpha", true), session("zulu", false)], vec![]);
+        state.update_zoxide_directories(vec![ZoxideDirectory {
+            directory: "/work/project".into(),
+            session_name: "project".into(),
+            ranking: 100.0,
+        }]);
+        state.selected_index = Some(1);
+        let history = state.session_usage.record("zulu", 20);
+        state.update_session_usage(&history);
+        assert_eq!(names(&state), ["zulu", "alpha"]);
+        assert_eq!(state.selected_index(), Some(0));
+        assert_eq!(state.selected_item().unwrap().session_name(), Some("zulu"));
+        assert!(matches!(
+            state.combined_items().last(),
+            Some(SessionItem::Directory { .. })
+        ));
+    }
+
+    #[test]
+    fn visibility_changes_preserve_the_new_session_form() {
+        let mut state = PluginState {
+            active_screen: ActiveScreen::NewSession,
+            ..Default::default()
+        };
+        state.new_session_info.set_name("project");
+        state.new_session_info.advance_to_layout_selection();
+        state.set_visible(true);
+        state.set_visible(false);
+        state.set_visible(true);
+        assert_eq!(state.active_screen(), ActiveScreen::NewSession);
+        assert_eq!(state.new_session_info.name(), "project");
+        assert!(state.new_session_info.entering_layout_search_term());
     }
 }

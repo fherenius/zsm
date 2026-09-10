@@ -43,11 +43,26 @@ impl Default for SearchEngine {
 impl SearchEngine {
     /// Update search term and perform search
     pub fn update_search(&mut self, term: String, items: &[SessionItem]) {
+        let selected = if term == self.search_term {
+            self.selected_item().cloned()
+        } else {
+            self.selected_index = None;
+            None
+        };
         self.search_term = term;
         self.is_searching = !self.search_term.is_empty();
 
         if self.is_searching {
             self.perform_search(items);
+            if let Some(selected) = selected {
+                if let Some(index) = self
+                    .results
+                    .iter()
+                    .position(|result| result.item.same_identity(&selected))
+                {
+                    self.selected_index = Some(index);
+                }
+            }
         } else {
             self.results.clear();
             self.selected_index = None;
@@ -56,14 +71,16 @@ impl SearchEngine {
 
     /// Add character to search term
     pub fn add_char(&mut self, c: char, items: &[SessionItem]) {
-        self.search_term.push(c);
-        self.update_search(self.search_term.clone(), items);
+        let mut term = self.search_term.clone();
+        term.push(c);
+        self.update_search(term, items);
     }
 
     /// Remove last character from search term
     pub fn backspace(&mut self, items: &[SessionItem]) {
-        self.search_term.pop();
-        self.update_search(self.search_term.clone(), items);
+        let mut term = self.search_term.clone();
+        term.pop();
+        self.update_search(term, items);
     }
 
     /// Clear search term
@@ -131,7 +148,7 @@ impl SearchEngine {
             }
         }
 
-        // Sort results: sessions first, then by score
+        // Keep matching sessions in last-used order; rank directories by score.
         matches.sort_by(|a, b| {
             let a_is_session = a.item.is_session() || a.item.is_resurrectable_session();
             let b_is_session = b.item.is_session() || b.item.is_resurrectable_session();
@@ -139,6 +156,7 @@ impl SearchEngine {
             match (a_is_session, b_is_session) {
                 (true, false) => std::cmp::Ordering::Less, // a (session) comes first
                 (false, true) => std::cmp::Ordering::Greater, // b (session) comes first
+                (true, true) => std::cmp::Ordering::Equal, // Stable sort retains recency
                 _ => b.score.cmp(&a.score),                // Same type, sort by score
             }
         });
@@ -159,5 +177,59 @@ impl SearchEngine {
                 _ => {} // Keep current selection if valid
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(name: &str) -> SessionItem {
+        SessionItem::ExistingSession {
+            name: name.into(),
+            directory: String::new(),
+            is_current: false,
+        }
+    }
+
+    #[test]
+    fn matching_sessions_keep_recency_order_even_with_different_scores() {
+        let mut search = SearchEngine::default();
+        search.update_search(
+            "abc".into(),
+            &[
+                session("a-long-b-long-c"),
+                session("abc"),
+                SessionItem::Directory {
+                    path: "abc".into(),
+                    session_name: "abc".into(),
+                },
+            ],
+        );
+        assert_eq!(search.results().len(), 3);
+        assert_eq!(
+            search.results()[0].item.session_name(),
+            Some("a-long-b-long-c")
+        );
+        assert_eq!(search.results()[1].item.session_name(), Some("abc"));
+        assert!(search.results()[2].item.session_name().is_none());
+    }
+
+    #[test]
+    fn refresh_preserves_selection_and_a_new_query_selects_the_first_match() {
+        let mut search = SearchEngine::default();
+        search.update_search("a".into(), &[session("alpha"), session("beta")]);
+        search.move_selection_down();
+        search.update_search("a".into(), &[session("beta"), session("alpha")]);
+        assert_eq!(search.selected_item().unwrap().session_name(), Some("beta"));
+        search.add_char('l', &[session("beta"), session("alpha")]);
+        assert_eq!(
+            search.selected_item().unwrap().session_name(),
+            Some("alpha")
+        );
+        search.clear();
+        assert!(!search.is_searching());
+        assert!(search.results().is_empty());
+        assert!(search.selected_item().is_none());
     }
 }

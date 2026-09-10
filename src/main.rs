@@ -32,6 +32,7 @@ impl ZellijPlugin for PluginState {
             EventType::PermissionRequestResult,
             // Re-fetch zoxide directories whenever the plugin is reopened/focused
             EventType::Visible,
+            EventType::Timer,
         ]);
 
         // Don't fetch zoxide directories immediately - wait for permissions
@@ -54,15 +55,19 @@ impl ZellijPlugin for PluginState {
             Event::PermissionRequestResult(permission_status) => {
                 match permission_status {
                     PermissionStatus::Granted => {
+                        self.permissions_granted = true;
                         // Now that we have permissions, fetch zoxide directories
                         self.fetch_zoxide_directories();
                         // Pull the full session list. The passive SessionUpdate event
                         // only ever carries the current session until a plugin actively
                         // requests the list (Zellij 0.44 API model), so we must pull it.
                         self.fetch_sessions();
+                        self.refresh_session_usage();
+                        self.schedule_session_refresh();
                         should_render = true;
                     }
                     PermissionStatus::Denied => {
+                        self.permissions_granted = false;
                         self.set_error(
                             "RunCommands permission denied - cannot fetch zoxide directories"
                                 .to_string(),
@@ -71,9 +76,10 @@ impl ZellijPlugin for PluginState {
                     }
                 }
             }
-            Event::SessionUpdate(session_infos, resurrectable_session_infos) => {
-                self.update_sessions(session_infos);
-                self.update_resurrectable_sessions(resurrectable_session_infos);
+            Event::SessionUpdate(session_infos, _) => {
+                // Notifications can precede a newer explicit snapshot. Never
+                // replace its membership with the host's stale peer cache.
+                self.update_session_notification(session_infos);
                 should_render = true;
             }
             Event::RunCommandResult(exit_code, stdout, stderr, context)
@@ -92,13 +98,39 @@ impl ZellijPlugin for PluginState {
                     should_render = true;
                 }
             }
-            Event::Visible(true) => {
+            Event::RunCommandResult(exit_code, stdout, stderr, context)
+                if context.contains_key("session_usage") =>
+            {
+                if exit_code == Some(0) {
+                    self.update_session_usage(&String::from_utf8_lossy(&stdout));
+                    should_render = true;
+                } else {
+                    eprintln!(
+                        "[zsm] session usage cache failed: {}",
+                        String::from_utf8_lossy(&stderr)
+                    );
+                }
+            }
+            Event::Visible(visible) => {
+                self.set_visible(visible);
                 // Plugin was (re)opened or focused - refresh the zoxide list so it
                 // reflects directories visited since it was last shown, and re-pull
                 // the session list (it may have changed while we were hidden).
-                self.fetch_zoxide_directories();
-                self.fetch_sessions();
-                should_render = true;
+                if visible {
+                    self.fetch_zoxide_directories();
+                    self.fetch_sessions();
+                    self.refresh_session_usage();
+                    self.schedule_session_refresh();
+                    should_render = true;
+                }
+            }
+            Event::Timer(_) => {
+                self.refresh_timer_pending = false;
+                if self.is_visible && self.permissions_granted {
+                    self.fetch_sessions();
+                    self.schedule_session_refresh();
+                    should_render = true;
+                }
             }
             _ => (),
         }
@@ -143,27 +175,35 @@ impl ZellijPlugin for PluginState {
 
 impl PluginState {
     fn fetch_zoxide_directories(&mut self) {
+        if !self.permissions_granted {
+            return;
+        }
         let mut context = BTreeMap::new();
         context.insert("zoxide_query".to_string(), "true".to_string());
         run_command(&["zoxide", "query", "-l", "-s"], context);
     }
 
-    /// Pull the full session list directly from Zellij via `get_session_list()`.
-    ///
-    /// Zellij only refreshes the server-side peer-session cache (the source of the
-    /// `SessionUpdate` event) when a plugin actively calls `get_session_list()`.
-    /// Subscribing to `SessionUpdate` alone yields only the current session, so we
-    /// pull the list explicitly (this also primes the cache, so subsequent
-    /// `SessionUpdate` events become complete). Mirrors the built-in session-manager.
+    /// Pull membership explicitly; passive events can carry stale peer caches.
     fn fetch_sessions(&mut self) {
+        if !self.permissions_granted {
+            return;
+        }
         match get_session_list() {
             Ok(snapshot) => {
-                self.update_sessions(snapshot.live_sessions);
-                self.update_resurrectable_sessions(snapshot.resurrectable_sessions);
+                self.update_session_list(snapshot.live_sessions, snapshot.resurrectable_sessions);
             }
             Err(e) => {
                 eprintln!("[zsm] get_session_list failed: {}", e);
             }
+        }
+    }
+
+    fn schedule_session_refresh(&mut self) {
+        // Do not fetch in response to SessionUpdate: get_session_list itself
+        // emits that event in Zellij 0.45.1, which would create a feedback loop.
+        if self.permissions_granted && self.is_visible && !self.refresh_timer_pending {
+            self.refresh_timer_pending = true;
+            set_timeout(1.0);
         }
     }
 

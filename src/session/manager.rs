@@ -20,6 +20,18 @@ impl SessionManager {
         self.sessions = sessions;
     }
 
+    /// Passive notifications use Zellij's peer cache. Only the current session
+    /// is fresh; membership is reconciled by explicit full snapshots instead.
+    pub fn update_current_session(&mut self, sessions: Vec<SessionInfo>) {
+        for session in sessions.into_iter().filter(|s| s.is_current_session) {
+            if let Some(existing) = self.sessions.iter_mut().find(|s| s.name == session.name) {
+                *existing = session;
+            } else {
+                self.sessions.push(session);
+            }
+        }
+    }
+
     /// Update the resurrectable sessions
     pub fn update_resurrectable_sessions(
         &mut self,

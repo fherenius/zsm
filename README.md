@@ -130,8 +130,12 @@ ZSM automatically generates meaningful session names:
 ### 3. Session Integration
 
 - **Existing sessions** are shown with indicators: `● current` or `○ available`
+- **Last-used order**: Sessions you visit through ZSM appear most recent first, including while searching. Opening the picker records the current session and starts with an empty search. Sessions without recorded visits sort by name.
+- **Fresh session list**: ZSM refreshes sessions when opened and every second while visible, including sessions whose directories are absent from zoxide.
 - **Resurrectable sessions** (if enabled) are shown with a `↺` icon
 - **Auto-increment**: If session `webapp` exists, creates `webapp.2`, `webapp.3`, etc.
+
+Visit history is shared between ZSM instances in `$XDG_CACHE_HOME/zsm/session-usage` (default: `~/.cache/zsm/session-usage`). Tracking starts when you use this version; Zellij does not expose historical last-used times. Directories keep their zoxide ranking.
 
 ### 4. Quick Workflows
 
@@ -153,7 +157,7 @@ ZSM automatically generates meaningful session names:
 
 ZSM requires these Zellij permissions:
 
-- **RunCommands**: Execute zoxide queries
+- **RunCommands**: Execute zoxide queries and read/write shared session visit history
 - **ReadApplicationState**: Read existing sessions and layouts
 - **ChangeApplicationState**: Create and switch sessions  
 - **MessageAndLaunchOtherPlugins**: Launch filepicker

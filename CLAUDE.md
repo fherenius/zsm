@@ -43,13 +43,13 @@ Plugin logs (including `eprintln!`) go to Zellij's log file, e.g. `tail -f $(fin
 
 ### Tests
 
-The pure logic lives in a **lib target** (`src/lib.rs`) precisely so it can be tested: the binary links `zellij-tile`, whose host imports are undefined off `wasm32-wasip1`, so a test harness containing the binary will not link. Run the suite against the host:
+The pure logic lives in a **lib target** (`src/lib.rs`). Zellij-tile 0.45.1 also supplies a native host-command stub, so state and search tests in the binary can link. Run both suites against the host:
 
 ```bash
-cargo test --lib --target aarch64-apple-darwin   # or your host triple
+cargo test --target aarch64-apple-darwin   # or your host triple
 ```
 
-Anything Zellij-free belongs in the lib (`naming`, `session_name`, `text`, `list`, `config`) and should come with tests. The binary modules (`state`, `ui`, `session`, `zoxide`, `new_session_info`) are not covered — keep logic out of them where you reasonably can.
+Anything Zellij-free belongs in the lib (`naming`, `session_name`, `session_usage`, `text`, `list`, `config`) and should come with tests. Binary tests cover state transitions, session membership, and search ordering without calling the host APIs that require responses from Zellij.
 
 Note: nixpkgs' `rustc` ships no `wasm32-wasip1` std, so a plain `nix shell nixpkgs#cargo` can only `cargo check --target <host>`. For a real WASM build without rustup, use docker: `docker run --rm -v "$PWD":/w -w /w rust:1-slim sh -c 'rustup target add wasm32-wasip1 && cargo build --release'`.
 
@@ -60,7 +60,7 @@ Note: nixpkgs' `rustc` ships no `wasm32-wasip1` std, so a plain `nix shell nixpk
 `register_plugin!(PluginState)` wires `PluginState` into Zellij via the `ZellijPlugin` trait. The flow is strictly event-driven:
 
 1. **`load()`** — initializes config from the KDL `BTreeMap`, requests permissions (`RunCommands`, `ReadApplicationState`, `ChangeApplicationState`, `MessageAndLaunchOtherPlugins`), and subscribes to events. **It does not fetch zoxide directories yet.**
-2. **`update(event)`** — handles `Key`, `SessionUpdate`, `ModeUpdate`, `RunCommandResult`, `PermissionRequestResult`, `Visible`. Returns `bool` = "should re-render". Zoxide is fetched only **after** `PermissionStatus::Granted` arrives — this permission-gated sequencing is load-bearing; fetching earlier silently fails. `Visible(true)` re-queries zoxide and re-pulls the session list, so **naming and the merge re-run every time the plugin is shown** — keep both cheap.
+2. **`update(event)`** — handles `Key`, `SessionUpdate`, `ModeUpdate`, `RunCommandResult`, `PermissionRequestResult`, `Visible`, and `Timer`. Returns `bool` = "should re-render". Fetches wait for `PermissionStatus::Granted`. Opening the picker clears its search, re-queries zoxide, and refreshes sessions and shared visit history. A single timer refreshes session membership every second while visible. Passive `SessionUpdate` events update only current-session details: their peer cache can be stale, and fetching directly in response would create an event loop in Zellij 0.45.1. **Naming and the merge re-run every time the plugin is shown** — keep both cheap.
 3. **`pipe()`** — receives the filepicker plugin's result (matched by `request_id`).
 4. **`render(rows, cols)`** — delegates to `PluginRenderer`.
 
@@ -75,6 +75,7 @@ Note: nixpkgs' `rustc` ships no `wasm32-wasip1` std, so a plain `nix shell nixpk
 ### Module map
 
 - `session/` — `SessionManager` (switch/kill/delete-dead sessions, `generate_incremented_name`) and `types.rs` (`SessionItem`, `SessionAction`).
+- `session_usage.rs` — last-used ordering and shared history parsing. `session/usage.sh` runs on the host to append visits and read `$XDG_CACHE_HOME/zsm/session-usage` (falling back to `~/.cache`); session names are encoded and passed as arguments, never interpolated into shell code. Matching sessions retain visit order during fuzzy search.
 - `zoxide/` — `ZoxideDirectory` (path + ranking + generated `session_name`; its `Ord` is what `process_zoxide_output` sorts by) and `SearchEngine` (fuzzy matching via `fuzzy-matcher`/skim; sorts sessions before directories). Search matches `SessionItem::display_text`, which is **also** what the renderer draws — that shared method is what keeps fuzzy match indices pointing at the right characters, so do not format rows anywhere else.
 - `new_session_info.rs` — the new-session screen state machine: `EnteringName` → `EnteringLayoutSearch`, with layout fuzzy search and the actual `switch_session_with_layout`/`switch_session_with_cwd` calls.
 - `ui/` — `PluginRenderer` (`renderer.rs`) draws both screens via `print_text_with_coordinates` / `print_table_with_coordinates`. `theme.rs` uses **indexed colors (0–3) that map to the user's Zellij theme**; there is deliberately no palette anywhere, so do not hardcode RGB. Add a named role to `Theme` rather than calling `color_range` at the call site.

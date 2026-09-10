@@ -17,6 +17,22 @@ pub enum SessionItem {
 }
 
 impl SessionItem {
+    pub fn session_name(&self) -> Option<&str> {
+        match self {
+            Self::ExistingSession { name, .. } | Self::ResurrectableSession { name, .. } => {
+                Some(name)
+            }
+            Self::Directory { .. } => None,
+        }
+    }
+
+    pub fn same_identity(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Directory { path: a, .. }, Self::Directory { path: b, .. }) => a == b,
+            _ => self.session_name().is_some() && self.session_name() == other.session_name(),
+        }
+    }
+
     /// Check if this is an existing session
     pub fn is_session(&self) -> bool {
         matches!(self, SessionItem::ExistingSession { .. })
