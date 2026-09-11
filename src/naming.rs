@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use crate::config::Config;
-use crate::session_name::MAX_SESSION_NAME_BYTES;
+use crate::session_name::{self, MAX_SESSION_NAME_BYTES};
 use crate::text;
 
 /// Character budget for a generated name.
@@ -53,7 +53,49 @@ pub fn session_names(paths: &[&str], config: &Config) -> Vec<String> {
         }
     }
 
-    names
+    // Context, base-path stripping and abbreviation can all introduce clashes,
+    // including across different basename groups. Resolve against the original
+    // paths in a stable order, reserving ordinary names before adding suffixes.
+    let paths_by_name: BTreeMap<&str, usize> = paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| (*path, index))
+        .collect();
+    let mut counts = BTreeMap::new();
+    for &index in paths_by_name.values() {
+        *counts.entry(names[index].clone()).or_insert(0) += 1;
+    }
+    let mut used: HashSet<String> = names.iter().cloned().collect();
+    let mut resolved = BTreeMap::new();
+    for (path, index) in paths_by_name {
+        let name = &names[index];
+        let resolved_name = if counts[name] == 1 && session_name::validate(name).is_ok() {
+            name.clone()
+        } else {
+            // FNV-1a is specified here rather than using Rust's unspecified
+            // DefaultHasher, so names stay stable across builds and processes.
+            let hash = path.bytes().fold(0x811c9dc5u32, |hash, byte| {
+                (hash ^ u32::from(byte)).wrapping_mul(0x01000193)
+            });
+            let base = name.replace('/', "-");
+            let mut counter = 0;
+            loop {
+                let suffix = if counter == 0 {
+                    format!("{hash:08x}")
+                } else {
+                    format!("{hash:08x}-{counter}")
+                };
+                let candidate = session_name::with_suffix(&base, ".", &suffix)
+                    .expect("a short ASCII suffix always fits the name budget");
+                if used.insert(candidate.clone()) {
+                    break candidate;
+                }
+                counter += 1;
+            }
+        };
+        resolved.insert(path, resolved_name);
+    }
+    paths.iter().map(|path| resolved[*path].clone()).collect()
 }
 
 /// The basename of `path`, or an empty string if it has none (`/`).
@@ -519,5 +561,37 @@ mod tests {
     #[test]
     fn an_empty_directory_list_produces_no_names() {
         assert!(session_names(&[], &plain()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod collision_tests {
+    use super::*;
+    #[test]
+    fn final_names_are_unique_stable_and_valid_after_normalization() {
+        let config = Config {
+            base_paths: vec!["/a".into(), "/b".into()],
+            ..Default::default()
+        };
+        let paths = [
+            "/a/x",
+            "/b/x",
+            "/x/a/api",
+            "/y/b/api",
+            "/z/a.api",
+            "/long/abcdefghijklmnopqrstuvwxyz123456",
+            "/long/abcdefghijklmnopqrstuvwxyz654321",
+        ];
+        let names = session_names(&paths, &config);
+        assert_eq!(names.iter().collect::<HashSet<_>>().len(), paths.len());
+        assert!(names
+            .iter()
+            .all(|name| session_name::validate(name).is_ok()));
+        let reversed: Vec<_> = paths.iter().rev().copied().collect();
+        assert_eq!(
+            names.iter().rev().cloned().collect::<Vec<_>>(),
+            session_names(&reversed, &config)
+        );
+        assert_eq!(session_names(&["/a/x", "/a/x"], &config), ["x", "x"]);
     }
 }

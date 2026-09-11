@@ -1,3 +1,4 @@
+use crate::session::creation::CreationRequest;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use std::path::PathBuf;
@@ -24,12 +25,12 @@ enum EnteringState {
 ///
 /// The caller needs to tell "moved to the next field" apart from "finished",
 /// otherwise it cannot know whether to leave the screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectionOutcome {
     /// Moved from the name field to the layout picker; stay on this screen.
     AdvancedToLayout,
     /// A session was requested; leave this screen.
-    Created,
+    Create(CreationRequest),
     /// The name cannot be used; show this message instead.
     Rejected(&'static str),
 }
@@ -148,55 +149,21 @@ impl NewSessionInfo {
         }
     }
 
-    /// Create the session straight away, using `default_layout` if it names a
-    /// layout this session knows about.
-    pub fn handle_quick_session_creation(
-        &mut self,
-        current_session_name: &Option<String>,
-        default_layout: &Option<String>,
-        is_name_taken: impl FnOnce(&str) -> bool,
-    ) -> Result<(), &'static str> {
-        session_name::validate_for_creation(
-            &self.name,
-            current_session_name.as_deref(),
-            is_name_taken,
-        )?;
-
-        let layout = default_layout.as_ref().and_then(|layout_name| {
-            self.layout_list
-                .layout_list
-                .iter()
-                .find(|layout| layout.name() == layout_name)
-                .cloned()
-        });
-
-        self.switch_to_new_session(layout);
-        Ok(())
-    }
-
-    /// Ask Zellij for the session currently described by this screen.
-    ///
-    /// An empty name means "pick a random one", which Zellij does for `None`.
-    fn switch_to_new_session(&mut self, layout: Option<LayoutInfo>) {
-        let new_session_name = if self.name.is_empty() {
-            None
-        } else {
-            Some(self.name.as_str())
-        };
-        let cwd = self.new_session_folder.clone();
-
-        match layout {
-            Some(layout) => switch_session_with_layout(new_session_name, layout, cwd),
-            None => switch_session_with_cwd(new_session_name, cwd),
-        }
-
-        self.reset_after_creation();
-        hide_self();
+    pub fn quick_creation_request(
+        &self,
+        default_layout: Option<&str>,
+    ) -> Result<CreationRequest, &'static str> {
+        CreationRequest::with_default_layout(
+            self.name.clone(),
+            self.new_session_folder.clone(),
+            default_layout,
+            &self.layout_list.layout_list,
+        )
     }
 
     /// Return the form to its initial state while retaining the layouts fetched
     /// from Zellij for the next use.
-    fn reset_after_creation(&mut self) {
+    pub fn reset_after_creation(&mut self) {
         self.name.clear();
         self.new_session_folder = None;
         self.entering_new_session_info = EnteringState::EnteringName;
@@ -225,8 +192,16 @@ impl NewSessionInfo {
         match self.entering_new_session_info {
             EnteringState::EnteringLayoutSearch => {
                 let layout = self.selected_layout_info();
-                self.switch_to_new_session(layout);
-                SelectionOutcome::Created
+                if self.is_searching() && layout.is_none() {
+                    return SelectionOutcome::Rejected(
+                        "No matching layout; edit or clear the search",
+                    );
+                }
+                SelectionOutcome::Create(CreationRequest {
+                    name: self.name.clone(),
+                    folder: self.new_session_folder.clone(),
+                    layout,
+                })
             }
             EnteringState::EnteringName => {
                 self.entering_new_session_info = EnteringState::EnteringLayoutSearch;
@@ -301,26 +276,8 @@ impl NewSessionInfo {
         self.layout_list.selected_layout_info()
     }
     fn update_layout_search_term(&mut self) {
-        if self.layout_list.layout_search_term.is_empty() {
-            self.layout_list.clear_search();
-        } else {
-            let mut matches = vec![];
-            let matcher = SkimMatcherV2::default().use_cache(true);
-            for layout_info in &self.layout_list.layout_list {
-                if let Some((score, indices)) =
-                    matcher.fuzzy_indices(layout_info.name(), &self.layout_list.layout_search_term)
-                {
-                    matches.push(LayoutSearchResult {
-                        layout_info: layout_info.clone(),
-                        score,
-                        indices,
-                    });
-                }
-            }
-            matches.sort_by_key(|result| std::cmp::Reverse(result.score));
-            self.layout_list.layout_search_results = matches;
-            self.layout_list.clear_selection();
-        }
+        self.layout_list.refresh_search();
+        self.layout_list.clear_selection();
     }
     fn move_selection_up(&mut self) {
         self.layout_list.move_selection_up();
@@ -340,12 +297,43 @@ pub struct LayoutList {
 
 impl LayoutList {
     pub fn update_layout_list(&mut self, layout_list: Vec<LayoutInfo>) {
-        let old_layout_length = self.layout_list.len();
+        let selected = self.selected_layout_info();
         self.layout_list = layout_list;
-        if old_layout_length != self.layout_list.len() {
-            // honestly, this is just the UX choice that sucks the least...
-            self.clear_selection();
+        self.refresh_search();
+        self.selected_layout_index = selected
+            .and_then(|selected| {
+                if self.layout_search_term.is_empty() {
+                    self.layout_list
+                        .iter()
+                        .position(|layout| same_layout(layout, &selected))
+                } else {
+                    self.layout_search_results
+                        .iter()
+                        .position(|result| same_layout(&result.layout_info, &selected))
+                }
+            })
+            .unwrap_or(0);
+    }
+
+    fn refresh_search(&mut self) {
+        self.layout_search_results.clear();
+        if self.layout_search_term.is_empty() {
+            return;
         }
+        let matcher = SkimMatcherV2::default().use_cache(true);
+        for layout in &self.layout_list {
+            if let Some((score, indices)) =
+                matcher.fuzzy_indices(layout.name(), &self.layout_search_term)
+            {
+                self.layout_search_results.push(LayoutSearchResult {
+                    layout_info: layout.clone(),
+                    score,
+                    indices,
+                });
+            }
+        }
+        self.layout_search_results
+            .sort_by_key(|result| std::cmp::Reverse(result.score));
     }
     pub fn selected_layout_info(&self) -> Option<LayoutInfo> {
         if !self.layout_search_term.is_empty() {
@@ -394,4 +382,56 @@ pub struct LayoutSearchResult {
     pub layout_info: LayoutInfo,
     pub score: i64,
     pub indices: Vec<usize>,
+}
+
+// File metadata can change without changing a layout's identity.
+fn same_layout(a: &LayoutInfo, b: &LayoutInfo) -> bool {
+    std::mem::discriminant(a) == std::mem::discriminant(b) && a.name() == b.name()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refresh_preserves_identity_and_discards_removed_search_results() {
+        let mut form = NewSessionInfo::default();
+        let a = LayoutInfo::BuiltIn("alpha".into());
+        let b = LayoutInfo::BuiltIn("beta".into());
+        form.update_layout_list(vec![a.clone(), b.clone()]);
+        form.advance_to_layout_selection();
+        form.move_selection_down();
+        form.update_layout_list(vec![b.clone(), a.clone()]);
+        assert_eq!(form.selected_layout_info(), Some(b.clone()));
+        form.add_char('b');
+        form.update_layout_list(vec![a]);
+        assert!(form.selected_layout_info().is_none());
+        assert!(form.layouts_to_render(10).is_empty());
+        assert!(matches!(
+            form.handle_selection(&None, |_| false),
+            SelectionOutcome::Rejected(_)
+        ));
+        form.update_layout_list(vec![b.clone()]);
+        assert_eq!(form.selected_layout_info(), Some(b));
+    }
+
+    #[test]
+    fn creation_prepares_a_request_without_resetting_the_form() {
+        let mut form = NewSessionInfo::default();
+        form.set_name("project");
+        form.set_folder(Some("/work/project".into()));
+        assert_eq!(
+            form.handle_selection(&None, |_| false),
+            SelectionOutcome::AdvancedToLayout
+        );
+        let SelectionOutcome::Create(request) = form.handle_selection(&None, |_| false) else {
+            panic!("expected creation request")
+        };
+        assert_eq!(request.name, "project");
+        assert_eq!(request.folder, Some("/work/project".into()));
+        assert_eq!(form.name(), "project");
+        form.reset_after_creation();
+        assert!(form.name().is_empty());
+        assert!(form.new_session_folder().is_none());
+    }
 }

@@ -1,9 +1,9 @@
+use crate::session::creation::CreationRequest;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use zellij_tile::prelude::*;
 use zsm::config::Config;
 use zsm::list;
-use zsm::session_name;
 use zsm::session_usage::SessionUsage;
 
 use crate::new_session_info::{NewSessionInfo, SelectionOutcome};
@@ -428,7 +428,6 @@ impl PluginState {
     fn handle_new_session_key(&mut self, key: KeyWithModifier) -> bool {
         match key.bare_key {
             BareKey::Enter if key.has_no_modifiers() => {
-                let name = self.new_session_info.name().to_owned();
                 // Only leave the screen once a session was actually requested.
                 // Enter in the name field just moves on to the layout picker;
                 // returning to the main screen there threw the name away and
@@ -439,28 +438,17 @@ impl PluginState {
                         self.session_manager.name_taken(name)
                     }) {
                     SelectionOutcome::AdvancedToLayout => {}
-                    SelectionOutcome::Created => {
-                        self.record_session_visit(Some(&name));
-                        self.active_screen = ActiveScreen::Main;
-                        self.set_visible(false);
-                    }
+                    SelectionOutcome::Create(request) => self.create_session(request),
                     SelectionOutcome::Rejected(message) => self.set_error(message.to_string()),
                 }
                 true
             }
             BareKey::Enter if key.has_modifiers(&[KeyModifier::Ctrl]) => {
-                let name = self.new_session_info.name().to_owned();
-                // Quick session creation with default layout
-                match self.new_session_info.handle_quick_session_creation(
-                    &self.current_session_name,
-                    &self.config.default_layout,
-                    |name| self.session_manager.name_taken(name),
-                ) {
-                    Ok(()) => {
-                        self.record_session_visit(Some(&name));
-                        self.active_screen = ActiveScreen::Main;
-                        self.set_visible(false);
-                    }
+                match self
+                    .new_session_info
+                    .quick_creation_request(self.config.default_layout.as_deref())
+                {
+                    Ok(request) => self.create_session(request),
                     Err(message) => self.set_error(message.to_string()),
                 }
                 true
@@ -642,90 +630,58 @@ impl PluginState {
         self.new_session_info.set_folder(folder);
     }
 
-    /// Handle quick session creation from main screen
-    fn handle_quick_session_creation(&mut self) {
-        use zellij_tile::prelude::{switch_session_with_cwd, switch_session_with_layout};
-
-        // Get the selected item data or search term
-        let (new_session_name, session_folder) = if let Some(selected_item) = self.selected_item() {
-            match selected_item {
-                SessionItem::ExistingSession { name, .. } => {
-                    self.record_session_visit(Some(&name));
-                    // Switch to existing session
-                    switch_session_with_cwd(Some(&name), None);
-                    self.hide_picker();
-                    return;
-                }
-                SessionItem::ResurrectableSession { name, .. } => {
-                    self.record_session_visit(Some(&name));
-                    switch_session_with_cwd(Some(&name), None);
-                    self.hide_picker();
-                    return;
-                }
-                SessionItem::Directory {
-                    session_name, path, ..
-                } => {
-                    let incremented_name = self
-                        .session_manager
-                        .generate_incremented_name(&session_name, &self.config.session_separator);
-                    (incremented_name, Some(std::path::PathBuf::from(path)))
-                }
-            }
-        } else {
-            self.set_error("Please select a directory".to_string());
-            return;
-        };
-
-        if let Err(message) = session_name::validate_against_current(
-            &new_session_name,
-            self.current_session_name.as_deref(),
-        ) {
+    /// Validate and execute every new-session request through one path.
+    fn create_session(&mut self, request: CreationRequest) {
+        if let Err(message) = request.validate(self.current_session_name.as_deref(), |name| {
+            self.session_manager.name_taken(name)
+        }) {
             self.set_error(message.to_string());
             return;
         }
+        self.record_session_visit(Some(&request.name));
+        request.execute();
+        self.new_session_info.reset_after_creation();
+        self.active_screen = ActiveScreen::Main;
+        self.hide_picker();
+    }
 
-        // Create session with default layout if configured
-        self.record_session_visit(Some(&new_session_name));
-        match &self.config.default_layout {
-            Some(layout_name) => {
-                // Find the layout by name from current session's available layouts
-                if let Some(current_session) = self
+    fn handle_quick_session_creation(&mut self) {
+        match self.selected_item() {
+            Some(
+                SessionItem::ExistingSession { name, .. }
+                | SessionItem::ResurrectableSession { name, .. },
+            ) => {
+                self.record_session_visit(Some(&name));
+                let _ = self
+                    .session_manager
+                    .execute_action(SessionAction::Switch(name));
+                self.hide_picker();
+            }
+            Some(SessionItem::Directory {
+                session_name, path, ..
+            }) => {
+                let name = self
+                    .session_manager
+                    .generate_incremented_name(&session_name, &self.config.session_separator);
+                let layouts = self
                     .session_manager
                     .sessions()
                     .iter()
-                    .find(|s| s.is_current_session)
-                {
-                    let layout_info = current_session
-                        .available_layouts
-                        .iter()
-                        .find(|layout| layout.name() == layout_name)
-                        .cloned();
-
-                    match layout_info {
-                        Some(layout) => {
-                            switch_session_with_layout(
-                                Some(&new_session_name),
-                                layout,
-                                session_folder,
-                            );
-                        }
-                        None => {
-                            // Defined layout not found, create without layout
-                            switch_session_with_cwd(Some(&new_session_name), session_folder);
-                        }
-                    }
-                } else {
-                    // No current session info, cannot retrieve layouts, create without layout
-                    switch_session_with_cwd(Some(&new_session_name), session_folder);
+                    .find(|session| session.is_current_session)
+                    .map(|session| session.available_layouts.as_slice())
+                    .unwrap_or_default();
+                match CreationRequest::with_default_layout(
+                    name,
+                    Some(path.into()),
+                    self.config.default_layout.as_deref(),
+                    layouts,
+                ) {
+                    Ok(request) => self.create_session(request),
+                    Err(message) => self.set_error(message.to_string()),
                 }
             }
-            None => {
-                // No default layout configured, create without layout
-                switch_session_with_cwd(Some(&new_session_name), session_folder);
-            }
+            None => self.set_error("Please select a directory".to_string()),
         }
-
-        self.hide_picker();
     }
 }
 
