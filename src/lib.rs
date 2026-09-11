@@ -6,6 +6,11 @@
 pub mod config;
 pub mod list;
 pub mod naming;
+pub mod projects;
+mod records;
 pub mod session_name;
 pub mod session_usage;
 pub mod text;
+
+#[cfg(all(test, unix))]
+mod store_tests;

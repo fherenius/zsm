@@ -157,7 +157,11 @@ impl SearchEngine {
                 (true, false) => std::cmp::Ordering::Less, // a (session) comes first
                 (false, true) => std::cmp::Ordering::Greater, // b (session) comes first
                 (true, true) => std::cmp::Ordering::Equal, // Stable sort retains recency
-                _ => b.score.cmp(&a.score),                // Same type, sort by score
+                _ => b
+                    .item
+                    .is_pinned()
+                    .cmp(&a.item.is_pinned())
+                    .then_with(|| b.score.cmp(&a.score)), // Same type, sort by score
             }
         });
 
@@ -193,6 +197,30 @@ mod tests {
     }
 
     #[test]
+    fn pins_sort_before_other_matching_directories_but_after_sessions() {
+        let mut search = SearchEngine::default();
+        search.update_search(
+            "abc".into(),
+            &[
+                SessionItem::Directory {
+                    path: "abc".into(),
+                    session_name: "abc".into(),
+                    pinned: false,
+                },
+                SessionItem::Directory {
+                    path: "/a/long/b/path/c".into(),
+                    session_name: "c".into(),
+                    pinned: true,
+                },
+                session("abc"),
+            ],
+        );
+        assert!(search.results()[0].item.is_session());
+        assert!(search.results()[1].item.is_pinned());
+        assert!(!search.results()[2].item.is_pinned());
+    }
+
+    #[test]
     fn matching_sessions_keep_recency_order_even_with_different_scores() {
         let mut search = SearchEngine::default();
         search.update_search(
@@ -201,6 +229,7 @@ mod tests {
                 session("a-long-b-long-c"),
                 session("abc"),
                 SessionItem::Directory {
+                    pinned: false,
                     path: "abc".into(),
                     session_name: "abc".into(),
                 },

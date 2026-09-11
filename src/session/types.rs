@@ -13,7 +13,11 @@ pub enum SessionItem {
         duration: std::time::Duration,
     },
     /// A zoxide directory that can be used to create a new session
-    Directory { path: String, session_name: String },
+    Directory {
+        path: String,
+        session_name: String,
+        pinned: bool,
+    },
 }
 
 impl SessionItem {
@@ -31,6 +35,10 @@ impl SessionItem {
             (Self::Directory { path: a, .. }, Self::Directory { path: b, .. }) => a == b,
             _ => self.session_name().is_some() && self.session_name() == other.session_name(),
         }
+    }
+
+    pub fn is_pinned(&self) -> bool {
+        matches!(self, Self::Directory { pinned: true, .. })
     }
 
     /// Check if this is an existing session
@@ -72,7 +80,13 @@ impl SessionItem {
                 name,
                 humantime::format_duration(*duration)
             ),
-            SessionItem::Directory { path, .. } => path.clone(),
+            SessionItem::Directory { path, pinned, .. } => {
+                if *pinned {
+                    format!("★ {path}")
+                } else {
+                    path.clone()
+                }
+            }
         }
     }
 }

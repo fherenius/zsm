@@ -170,7 +170,7 @@ impl PluginRenderer {
         // shortens to fit the pane, so they have to be remapped the same way.
         let display_text = item.display_text();
         let adjusted_indices = match item {
-            SessionItem::Directory { .. } => {
+            SessionItem::Directory { pinned: false, .. } => {
                 remap_indices_after_elide_start(&display_text, max_width, indices)
             }
             _ => remap_indices_after_elide_middle(&display_text, max_width, indices),
@@ -203,7 +203,11 @@ impl PluginRenderer {
             SessionItem::ResurrectableSession { .. } => {
                 theme.available_session(&elide_middle(&display_text, max_width))
             }
-            SessionItem::Directory { .. } => theme.content(&elide_start(&display_text, max_width)),
+            SessionItem::Directory { pinned, .. } => theme.content(&if *pinned {
+                elide_middle(&display_text, max_width)
+            } else {
+                elide_start(&display_text, max_width)
+            }),
         }
     }
 
@@ -219,7 +223,7 @@ impl PluginRenderer {
                 "Ctrl+r: reload directories • Esc: Exit"
             }
         } else {
-            "↑/↓: Navigate • Enter: Switch/New • Ctrl+Enter: Quick create • Ctrl+r: reload directories • Ctrl+d: Kill • Type: Search • Esc: Exit"
+            "↑/↓: Navigate • Enter: Switch/New • Ctrl+Enter: Quick create • Ctrl+p: Pin/unpin • Ctrl+r: Reload • Ctrl+d: Kill • Type: Search • Esc: Exit"
         };
 
         print_text_with_coordinates(theme.help(help_text), x, y, None, None);

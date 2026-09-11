@@ -8,7 +8,6 @@ use state::PluginState;
 use std::collections::BTreeMap;
 use ui::PluginRenderer;
 use zellij_tile::prelude::*;
-use zsm::naming;
 
 register_plugin!(PluginState);
 
@@ -110,6 +109,17 @@ impl ZellijPlugin for PluginState {
                         String::from_utf8_lossy(&stderr)
                     );
                 }
+            }
+            Event::RunCommandResult(exit_code, stdout, stderr, context)
+                if context.contains_key("projects") =>
+            {
+                self.project_command_finished(
+                    exit_code == Some(0),
+                    &String::from_utf8_lossy(&stdout),
+                    &String::from_utf8_lossy(&stderr),
+                    context.get("creation_id").map(String::as_str),
+                );
+                should_render = true;
             }
             Event::Visible(visible) => {
                 self.set_visible(visible);
@@ -228,18 +238,6 @@ impl PluginState {
                     });
                 }
             }
-        }
-
-        // Generate smart session names before sorting
-        let names = {
-            let paths: Vec<&str> = directories
-                .iter()
-                .map(|directory| directory.directory.as_str())
-                .collect();
-            naming::session_names(&paths, self.config())
-        };
-        for (directory, name) in directories.iter_mut().zip(names) {
-            directory.session_name = name;
         }
 
         // Most-used first; see ZoxideDirectory's Ord impl.

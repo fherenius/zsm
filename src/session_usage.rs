@@ -1,5 +1,6 @@
 //! Session visits shared between ZSM instances on the same host.
 
+use crate::records::{decode, encode};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
@@ -12,7 +13,8 @@ impl SessionUsage {
     pub fn record(&mut self, name: &str, timestamp: u128) -> String {
         self.remember(name.to_owned(), timestamp);
         // Hex keeps arbitrary session names on one line and out of shell syntax.
-        let encoded: String = name.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        let encoded = encode(name);
+        self.prune();
         format!("{timestamp} {encoded}")
     }
 
@@ -31,18 +33,25 @@ impl SessionUsage {
             let Ok(timestamp) = timestamp.parse::<u128>() else {
                 continue;
             };
-            if encoded.is_empty() || encoded.len() % 2 != 0 || !encoded.is_ascii() {
-                continue;
-            }
-            let bytes: Result<Vec<_>, _> = (0..encoded.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&encoded[i..i + 2], 16))
-                .collect();
-            let Ok(bytes) = bytes else { continue };
-            if let Ok(name) = String::from_utf8(bytes) {
+            if let Some(name) = decode(encoded).filter(|name| !name.is_empty()) {
                 self.remember(name, timestamp);
             }
         }
+        self.prune();
+    }
+
+    fn prune(&mut self) {
+        const MAX_SESSIONS: usize = 4096;
+        if self.last_used.len() <= MAX_SESSIONS {
+            return;
+        }
+        let mut ordered: Vec<_> = self
+            .last_used
+            .iter()
+            .map(|(name, timestamp)| (name.clone(), *timestamp))
+            .collect();
+        ordered.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        self.last_used = ordered.into_iter().take(MAX_SESSIONS).collect();
     }
 
     /// Most recently visited first; names make sessions without history stable.
@@ -98,7 +107,7 @@ mod tests {
             .iter()
             .map(|record| {
                 Command::new("sh")
-                    .args(["-c", script, "zsm-test", record])
+                    .args(["-c", script, "zsm-test", "usage", record])
                     .env("XDG_CACHE_HOME", &cache)
                     .stdout(std::process::Stdio::null())
                     .spawn()
@@ -109,7 +118,7 @@ mod tests {
             assert!(child.wait().unwrap().success());
         }
         let output = Command::new("sh")
-            .args(["-c", script, "zsm-test"])
+            .args(["-c", script, "zsm-test", "usage"])
             .env("XDG_CACHE_HOME", &cache)
             .output()
             .unwrap();
@@ -119,7 +128,7 @@ mod tests {
         assert_eq!(restored.last_used, usage.last_used);
 
         let output = Command::new("sh")
-            .args(["-c", script, "zsm-test", &records[0]])
+            .args(["-c", script, "zsm-test", "usage", &records[0]])
             .env_remove("XDG_CACHE_HOME")
             .env("HOME", &root)
             .output()

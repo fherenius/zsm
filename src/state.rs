@@ -4,6 +4,7 @@ use std::time::Duration;
 use zellij_tile::prelude::*;
 use zsm::config::Config;
 use zsm::list;
+use zsm::projects::Projects;
 use zsm::session_usage::SessionUsage;
 
 use crate::new_session_info::{NewSessionInfo, SelectionOutcome};
@@ -17,12 +18,16 @@ pub struct PluginState {
     pub(crate) is_visible: bool,
     pub(crate) refresh_timer_pending: bool,
     session_usage: SessionUsage,
+    projects: Projects,
+    projects_loaded: bool,
+    pending_creation: Option<(String, CreationRequest)>,
     /// Plugin configuration
     config: Config,
     /// Session manager
     session_manager: SessionManager,
     /// Zoxide directories (managed separately from sessions)
     zoxide_directories: Vec<ZoxideDirectory>,
+    directory_items: Vec<SessionItem>,
     /// Search engine for fuzzy finding
     search_engine: SearchEngine,
     /// New session creation component
@@ -133,6 +138,7 @@ impl PluginState {
             "-c",
             include_str!("session/usage.sh"),
             "zsm-session-usage",
+            "usage",
         ];
         command.extend(records.iter().map(String::as_str));
         run_command(
@@ -144,6 +150,95 @@ impl PluginState {
 
     pub fn refresh_session_usage(&mut self) {
         self.record_session_visit(None);
+        self.run_project_command(None, None);
+    }
+
+    fn now() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    }
+
+    fn run_project_command(&self, record: Option<&str>, creation_id: Option<&str>) {
+        if !self.permissions_granted {
+            return;
+        }
+        let mut context = BTreeMap::from([("projects".into(), "true".into())]);
+        if let Some(id) = creation_id {
+            context.insert("creation_id".into(), id.into());
+        }
+        let mut command = vec![
+            "sh",
+            "-c",
+            include_str!("session/usage.sh"),
+            "zsm-projects",
+            "projects",
+        ];
+        command.extend(record);
+        run_command(&command, context);
+    }
+
+    pub fn project_command_finished(
+        &mut self,
+        success: bool,
+        output: &str,
+        error: &str,
+        creation_id: Option<&str>,
+    ) {
+        if success {
+            self.projects_loaded = true;
+            let old_pins: Vec<_> = self.projects.pinned_paths().map(str::to_owned).collect();
+            self.projects.merge(output);
+            if old_pins != self.projects.pinned_paths().collect::<Vec<_>>() {
+                self.rebuild_directory_items();
+            }
+            self.rebuild_combined_items();
+        } else {
+            self.set_error(format!("Could not save or load projects: {}", error.trim()));
+        }
+        if self
+            .pending_creation
+            .as_ref()
+            .is_some_and(|(id, _)| Some(id.as_str()) == creation_id)
+        {
+            let (_, request) = self.pending_creation.take().unwrap();
+            if success {
+                self.fetch_sessions();
+                // Revalidate after the asynchronous write, since membership can
+                // change while a command is running. Retain the form on failure.
+                if let Err(message) = request
+                    .validate(self.current_session_name.as_deref(), |name| {
+                        self.session_manager.name_taken(name)
+                    })
+                {
+                    self.set_error(message.to_string());
+                    return;
+                }
+                self.record_session_visit(Some(&request.name));
+                request.execute();
+                self.new_session_info.reset_after_creation();
+                self.active_screen = ActiveScreen::Main;
+                self.hide_picker();
+            }
+        }
+    }
+
+    fn toggle_selected_pin(&mut self) {
+        if !self.projects_loaded {
+            self.set_error("Projects are still loading; try again shortly".into());
+            return;
+        }
+        let path = match self.selected_item() {
+            Some(SessionItem::Directory { path, .. }) => path,
+            Some(SessionItem::ExistingSession { directory, .. }) if !directory.is_empty() => {
+                directory
+            }
+            _ => return,
+        };
+        let mut next = self.projects.clone();
+        let record = next.set_pinned(&path, !self.projects.is_pinned(&path), Self::now());
+        self.run_project_command(Some(&record), None);
     }
 
     fn hide_picker(&mut self) {
@@ -156,11 +251,15 @@ impl PluginState {
     /// Update zoxide directories (managed separately from sessions)
     pub fn update_zoxide_directories(&mut self, directories: Vec<ZoxideDirectory>) {
         self.zoxide_directories = directories;
+        self.rebuild_directory_items();
         self.rebuild_combined_items();
     }
 
     /// Handle key input
     pub fn handle_key(&mut self, key: KeyWithModifier) -> bool {
+        if self.pending_creation.is_some() {
+            return false;
+        }
         // Clear error on any key press
         if self.error.is_some() {
             self.error = None;
@@ -226,22 +325,14 @@ impl PluginState {
     fn build_combined_items(&self) -> Vec<SessionItem> {
         let mut items = Vec::new();
 
-        // Show every live Zellij session. A zoxide directory is matched only to
-        // decorate the entry with its path (by generated/incremented name) — it
-        // never gates visibility. Gating on a match would silently hide sessions
-        // with random auto-names, sessions whose cwd isn't in zoxide, and sessions
-        // created under a different `base_paths` config, leaving no way to switch
-        // to or kill them.
+        // Only explicit associations are trustworthy: generated names change
+        // with zoxide membership, configuration, and suffix truncation.
         for session in self.session_manager.sessions() {
             let directory = self
-                .zoxide_directories
-                .iter()
-                .find(|zoxide_dir| {
-                    session.name == zoxide_dir.session_name
-                        || self.is_incremented_session(&session.name, &zoxide_dir.session_name)
-                })
-                .map(|zoxide_dir| zoxide_dir.directory.clone())
-                .unwrap_or_default();
+                .projects
+                .directory(&session.name)
+                .unwrap_or_default()
+                .to_owned();
 
             items.push(SessionItem::ExistingSession {
                 name: session.name.clone(),
@@ -276,15 +367,45 @@ impl PluginState {
             )
         });
 
-        // Then add all zoxide directories (always show directories, even if sessions exist)
-        for dir in &self.zoxide_directories {
-            items.push(SessionItem::Directory {
-                path: dir.directory.clone(),
-                session_name: dir.session_name.clone(),
-            });
-        }
+        items.extend(self.directory_items.iter().cloned());
 
         items
+    }
+
+    fn rebuild_directory_items(&mut self) {
+        self.directory_items.clear();
+        // Pinned paths remain available even if zoxide later drops them.
+        let mut directories = self.zoxide_directories.clone();
+        let known: std::collections::HashSet<_> = directories
+            .iter()
+            .map(|dir| dir.directory.clone())
+            .collect();
+        for path in self
+            .projects
+            .pinned_paths()
+            .filter(|path| !known.contains(*path))
+        {
+            directories.push(ZoxideDirectory {
+                directory: path.into(),
+                ..Default::default()
+            });
+        }
+        let paths: Vec<_> = directories
+            .iter()
+            .map(|dir| dir.directory.as_str())
+            .collect();
+        let names = zsm::naming::session_names(&paths, &self.config);
+        for (dir, name) in directories.iter_mut().zip(names) {
+            dir.session_name = name;
+        }
+        directories.sort_by_key(|dir| !self.projects.is_pinned(&dir.directory));
+        for dir in directories {
+            self.directory_items.push(SessionItem::Directory {
+                pinned: self.projects.is_pinned(&dir.directory),
+                path: dir.directory,
+                session_name: dir.session_name,
+            });
+        }
     }
 
     /// Pull `selected_index` back inside the item list.
@@ -295,23 +416,6 @@ impl PluginState {
     /// an empty table while items existed, and made Enter a silent no-op.
     fn clamp_selection(&mut self) {
         self.selected_index = list::clamp_selection(self.selected_index, self.combined_items.len());
-    }
-
-    /// Check if session name is an incremented version of base name  
-    fn is_incremented_session(&self, session_name: &str, base_name: &str) -> bool {
-        if session_name.len() <= base_name.len() || !session_name.starts_with(base_name) {
-            return false;
-        }
-
-        let remainder = &session_name[base_name.len()..];
-        if !remainder.starts_with(&self.config.session_separator) {
-            return false;
-        }
-
-        // An empty remainder fails to parse, so it needs no separate check.
-        remainder[self.config.session_separator.len()..]
-            .parse::<u32>()
-            .is_ok()
     }
 
     /// Get search engine (for UI rendering)
@@ -353,11 +457,6 @@ impl PluginState {
         self.error.as_deref()
     }
 
-    /// Get current configuration
-    pub fn config(&self) -> &Config {
-        &self.config
-    }
-
     /// Get selected item
     pub fn selected_item(&self) -> Option<SessionItem> {
         if self.search_engine.is_searching() {
@@ -385,6 +484,10 @@ impl PluginState {
             }
             BareKey::Enter if key.has_modifiers(&[KeyModifier::Ctrl]) => {
                 self.handle_quick_session_creation();
+                true
+            }
+            BareKey::Char('p') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
+                self.toggle_selected_pin();
                 true
             }
             BareKey::Char('d') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
@@ -631,18 +734,41 @@ impl PluginState {
     }
 
     /// Validate and execute every new-session request through one path.
-    fn create_session(&mut self, request: CreationRequest) {
+    fn create_session(&mut self, mut request: CreationRequest) {
+        if !self.projects_loaded {
+            self.set_error("Projects are still loading; try again shortly".into());
+            return;
+        }
+        // Choose the random name here so its directory can be recorded before
+        // switching. Every session ZSM creates has a known, validated name.
+        if request.name.is_empty() {
+            let random = format!(
+                "session-{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            );
+            request.name = self
+                .session_manager
+                .generate_incremented_name(&random, &self.config.session_separator);
+        }
         if let Err(message) = request.validate(self.current_session_name.as_deref(), |name| {
             self.session_manager.name_taken(name)
         }) {
             self.set_error(message.to_string());
             return;
         }
-        self.record_session_visit(Some(&request.name));
-        request.execute();
-        self.new_session_info.reset_after_creation();
-        self.active_screen = ActiveScreen::Main;
-        self.hide_picker();
+        let mut next = self.projects.clone();
+        let record = next.set_directory(
+            &request.name,
+            request
+                .folder
+                .as_ref()
+                .map(|path| path.to_string_lossy())
+                .as_deref(),
+            Self::now(),
+        );
+        let id = uuid::Uuid::new_v4().to_string();
+        self.run_project_command(Some(&record), Some(&id));
+        self.pending_creation = Some((id, request));
     }
 
     fn handle_quick_session_creation(&mut self) {
@@ -703,6 +829,58 @@ mod tests {
             .iter()
             .filter_map(SessionItem::session_name)
             .collect()
+    }
+
+    #[test]
+    fn explicit_associations_survive_naming_changes_and_pins_survive_zoxide_removal() {
+        let mut state = PluginState::default();
+        state.update_session_list(
+            vec![session("project.2", true), session("guess", false)],
+            vec![],
+        );
+        state.update_zoxide_directories(vec![ZoxideDirectory {
+            directory: "/work/guess".into(),
+            session_name: "guess".into(),
+            ranking: 100.0,
+        }]);
+        let mut projects = Projects::default();
+        let pin = projects.set_pinned("/pinned/project", true, 10);
+        let folder = projects.set_directory("project.2", Some("/actual/project"), 11);
+        state.project_command_finished(true, &format!("{pin}\n{folder}"), "", None);
+        assert!(
+            matches!(&state.combined_items[2], SessionItem::Directory { path, pinned: true, .. } if path == "/pinned/project")
+        );
+        assert!(state.combined_items.iter().any(|item| matches!(item, SessionItem::ExistingSession { name, directory, .. } if name == "project.2" && directory == "/actual/project")));
+        assert!(state.combined_items.iter().any(|item| matches!(item, SessionItem::ExistingSession { name, directory, .. } if name == "guess" && directory.is_empty())));
+        state.update_zoxide_directories(vec![]);
+        assert_eq!(state.visible_item_count(), 3);
+        let unpin = projects.set_pinned("/pinned/project", false, 12);
+        state.project_command_finished(true, &unpin, "", None);
+        state.project_command_finished(true, &pin, "", None);
+        assert_eq!(state.visible_item_count(), 2);
+    }
+
+    #[test]
+    fn failed_persistence_keeps_the_creation_form_and_releases_pending_request() {
+        let mut state = PluginState {
+            projects_loaded: true,
+            active_screen: ActiveScreen::NewSession,
+            ..Default::default()
+        };
+        state.new_session_info.set_name("project");
+        state.pending_creation = Some((
+            "request".into(),
+            CreationRequest {
+                name: "project".into(),
+                folder: Some("/work/project".into()),
+                layout: None,
+            },
+        ));
+        state.project_command_finished(false, "", "disk full", Some("request"));
+        assert!(state.pending_creation.is_none());
+        assert_eq!(state.new_session_info.name(), "project");
+        assert_eq!(state.active_screen(), ActiveScreen::NewSession);
+        assert!(state.error().unwrap().contains("disk full"));
     }
 
     #[test]
