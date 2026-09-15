@@ -15,7 +15,7 @@ pub fn decode(encoded: &str) -> Option<String> {
     if encoded == "-" {
         return Some(String::new());
     }
-    if encoded.is_empty() || encoded.len() % 2 != 0 || !encoded.is_ascii() {
+    if encoded.is_empty() || !encoded.len().is_multiple_of(2) || !encoded.is_ascii() {
         return None;
     }
     let bytes: Option<Vec<_>> = (0..encoded.len())

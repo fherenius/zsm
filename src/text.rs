@@ -1,119 +1,179 @@
-//! Character-safe text shortening for the plugin UI.
-//!
-//! These helpers count characters, never bytes. The plugin renders zoxide paths
-//! and session names that may contain multi-byte characters, and slicing a
-//! `str` (or calling `String::truncate`) at a byte offset that lands inside a
-//! codepoint panics — which traps the whole WASM instance and kills the plugin.
+//! Terminal-column-aware text fitting with grapheme-safe cuts. Highlight
+//! indices remain Unicode scalar positions, as required by Zellij Text.
 
-/// Marker inserted where characters were dropped.
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
 const ELLIPSIS: &str = "...";
-/// Character width of [`ELLIPSIS`].
 const ELLIPSIS_WIDTH: usize = 3;
-/// Leading characters [`elide_middle`] keeps before the ellipsis.
 const HEAD_WIDTH: usize = 10;
 
-/// Shorten `text` to at most `max_chars` by dropping leading characters and
-/// prefixing an ellipsis.
-///
-/// Used for directory paths, where the tail (the project directory itself)
-/// carries more information than the leading path components.
-pub fn elide_start(text: &str, max_chars: usize) -> String {
-    let char_count = text.chars().count();
-    if char_count <= max_chars {
-        return text.to_string();
-    }
-    if max_chars <= ELLIPSIS_WIDTH {
-        return text.chars().take(max_chars).collect();
-    }
-
-    let keep = max_chars - ELLIPSIS_WIDTH;
-    let mut shortened = String::from(ELLIPSIS);
-    shortened.extend(text.chars().skip(char_count - keep));
-    shortened
+pub fn display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
 }
 
-/// Shorten `text` to at most `max_chars` by keeping the leading characters and
-/// the tail, with an ellipsis between them.
-///
-/// Used for session rows, where both the name (at the start) and the directory
-/// (at the end) matter.
-pub fn elide_middle(text: &str, max_chars: usize) -> String {
-    let char_count = text.chars().count();
-    if char_count <= max_chars {
-        return text.to_string();
+// All offsets below come from grapheme_indices, so slices cannot split either
+// a UTF-8 codepoint or a combining/emoji sequence.
+fn prefix_end(text: &str, columns: usize) -> usize {
+    if columns == 0 {
+        return 0;
     }
-    if max_chars <= ELLIPSIS_WIDTH {
-        return text.chars().take(max_chars).collect();
+    let mut width = 0;
+    let mut end = 0;
+    for (offset, grapheme) in text.grapheme_indices(true) {
+        width += display_width(grapheme);
+        if width > columns {
+            break;
+        }
+        end = offset + grapheme.len();
     }
-
-    let budget = max_chars - ELLIPSIS_WIDTH;
-    let head = budget.min(HEAD_WIDTH);
-    let tail = budget - head;
-
-    let mut shortened: String = text.chars().take(head).collect();
-    shortened.push_str(ELLIPSIS);
-    shortened.extend(text.chars().skip(char_count - tail));
-    shortened
+    end
 }
 
-/// Map character indices in `text` onto their positions after [`elide_start`].
-///
-/// Indices that land in the dropped prefix are discarded. This lives next to
-/// `elide_start` so the two cannot drift apart.
+pub fn truncate_columns(text: &str, columns: usize) -> String {
+    text[..prefix_end(text, columns)].to_owned()
+}
+
+struct Elision<'a> {
+    source: &'a str,
+    head_end: usize,
+    tail_start: usize,
+    marker: &'static str,
+}
+
+impl<'a> Elision<'a> {
+    fn new(text: &'a str, columns: usize, keep_head: bool) -> Self {
+        if columns == 0 {
+            return Self {
+                source: text,
+                head_end: 0,
+                tail_start: text.len(),
+                marker: "",
+            };
+        }
+        if display_width(text) <= columns {
+            return Self {
+                source: text,
+                head_end: text.len(),
+                tail_start: text.len(),
+                marker: "",
+            };
+        }
+        if columns <= ELLIPSIS_WIDTH {
+            return Self {
+                source: text,
+                head_end: prefix_end(text, columns),
+                tail_start: text.len(),
+                marker: "",
+            };
+        }
+        let budget = columns - ELLIPSIS_WIDTH;
+        let head_end = if keep_head {
+            prefix_end(text, budget.min(HEAD_WIDTH))
+        } else {
+            0
+        };
+        let tail_budget = budget - display_width(&text[..head_end]);
+        let mut tail_start = text.len();
+        let mut tail_width = 0;
+        for (offset, grapheme) in text.grapheme_indices(true).rev() {
+            if offset < head_end {
+                break;
+            }
+            tail_width += display_width(grapheme);
+            if tail_width > tail_budget {
+                break;
+            }
+            tail_start = offset;
+        }
+        Self {
+            source: text,
+            head_end,
+            tail_start,
+            marker: ELLIPSIS,
+        }
+    }
+
+    fn render(&self) -> String {
+        format!(
+            "{}{}{}",
+            &self.source[..self.head_end],
+            self.marker,
+            &self.source[self.tail_start..]
+        )
+    }
+
+    fn remap(&self, indices: &[usize]) -> Vec<usize> {
+        let head_chars = self.source[..self.head_end].chars().count();
+        let tail_char_start = self.source[..self.tail_start].chars().count();
+        let source_chars = self.source.chars().count();
+        indices
+            .iter()
+            .filter_map(|&index| {
+                if index >= source_chars {
+                    None
+                } else if index < head_chars {
+                    Some(index)
+                } else if index >= tail_char_start {
+                    Some(head_chars + self.marker.chars().count() + index - tail_char_start)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+/// Keep the tail of a directory path within a terminal-column budget.
+pub fn elide_start(text: &str, columns: usize) -> String {
+    Elision::new(text, columns, false).render()
+}
+
+/// Keep both the leading session name/marker and the tail of its path.
+pub fn elide_middle(text: &str, columns: usize) -> String {
+    Elision::new(text, columns, true).render()
+}
+
 pub fn remap_indices_after_elide_start(
     text: &str,
-    max_chars: usize,
+    columns: usize,
     indices: &[usize],
 ) -> Vec<usize> {
-    let char_count = text.chars().count();
-    if char_count <= max_chars {
-        return indices.to_vec();
-    }
-    if max_chars <= ELLIPSIS_WIDTH {
-        return indices.iter().copied().filter(|&i| i < max_chars).collect();
-    }
-
-    let dropped = char_count - (max_chars - ELLIPSIS_WIDTH);
-    indices
-        .iter()
-        .filter(|&&i| i >= dropped)
-        .map(|&i| i - dropped + ELLIPSIS_WIDTH)
-        .collect()
+    Elision::new(text, columns, false).remap(indices)
 }
 
-/// Map character indices in `text` onto their positions after [`elide_middle`].
-///
-/// Indices that land in the dropped middle are discarded.
 pub fn remap_indices_after_elide_middle(
     text: &str,
-    max_chars: usize,
+    columns: usize,
     indices: &[usize],
 ) -> Vec<usize> {
-    let char_count = text.chars().count();
-    if char_count <= max_chars {
-        return indices.to_vec();
-    }
-    if max_chars <= ELLIPSIS_WIDTH {
-        return indices.iter().copied().filter(|&i| i < max_chars).collect();
-    }
+    Elision::new(text, columns, true).remap(indices)
+}
 
-    let budget = max_chars - ELLIPSIS_WIDTH;
-    let head = budget.min(HEAD_WIDTH);
-    let tail = budget - head;
-    let tail_start = char_count - tail;
-
-    indices
-        .iter()
-        .filter_map(|&i| {
-            if i < head {
-                Some(i)
-            } else if i >= tail_start {
-                Some(head + ELLIPSIS_WIDTH + (i - tail_start))
-            } else {
-                None
-            }
-        })
-        .collect()
+/// Wrap messages without splitting a grapheme. An individual cluster wider
+/// than the whole pane is omitted because it cannot be displayed intact.
+pub fn wrap_columns(text: &str, columns: usize) -> Vec<String> {
+    if columns == 0 {
+        return vec![];
+    }
+    let mut lines = vec![];
+    let mut line = String::new();
+    let mut width = 0;
+    for grapheme in text.graphemes(true) {
+        let grapheme_width = display_width(grapheme);
+        if grapheme == "\n" || width + grapheme_width > columns {
+            lines.push(std::mem::take(&mut line));
+            width = 0;
+        }
+        if grapheme != "\n" && grapheme_width <= columns {
+            line.push_str(grapheme);
+            width += grapheme_width;
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// Truncate `text` to at most `max_chars` characters, dropping the tail.
@@ -145,6 +205,49 @@ mod tests {
 
     fn char_count(text: &str) -> usize {
         text.chars().count()
+    }
+
+    #[test]
+    fn wide_and_combining_graphemes_fit_and_highlights_stay_on_original_characters() {
+        let samples = [
+            "/work/日本語/設定",
+            "e\u{301}e\u{301}e\u{301}",
+            "★ 👩🏽‍💻 project /🇳🇱/👨‍👩‍👧‍👦/a",
+            "x/❤️/1️⃣/end",
+        ];
+        for sample in samples {
+            let source: Vec<_> = sample.chars().collect();
+            let clusters: Vec<_> = sample.graphemes(true).collect();
+            for width in 0..50 {
+                for middle in [false, true] {
+                    let plan = Elision::new(sample, width, middle);
+                    let rendered = plan.render();
+                    assert!(
+                        display_width(&rendered) <= width,
+                        "{rendered:?} exceeds {width}"
+                    );
+                    // Every retained piece consists only of whole source clusters.
+                    for part in [&sample[..plan.head_end], &sample[plan.tail_start..]] {
+                        assert!(part
+                            .graphemes(true)
+                            .all(|cluster| clusters.contains(&cluster)));
+                    }
+                    let chars: Vec<_> = rendered.chars().collect();
+                    for (index, expected) in source.iter().enumerate() {
+                        if let Some(&mapped) = plan.remap(&[index]).first() {
+                            assert_eq!(chars[mapped], *expected);
+                        }
+                    }
+                }
+                assert!(wrap_columns(sample, width)
+                    .iter()
+                    .all(|line| display_width(line) <= width));
+            }
+        }
+        assert_eq!(truncate_columns("日本", 3), "日");
+        assert_eq!(truncate_columns("e\u{301}x", 1), "e\u{301}");
+        assert_eq!(truncate_columns("👩🏽‍💻x", 2), "👩🏽‍💻");
+        assert_eq!(truncate_columns("👩🏽‍💻x", 1), "");
     }
 
     #[test]

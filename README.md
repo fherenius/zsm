@@ -11,6 +11,7 @@ ZSM bridges the gap between `zoxide` and Zellij's session management:
 - **🔍 Fuzzy Search**: Search through directories and existing sessions simultaneously
 - **🧠 Intelligent Naming**: Auto-generates meaningful session names with conflict resolution
 - **⚙️ Layout Support**: Choose from available layouts or use your default layout
+- **📌 Pinned Projects**: Pin directories with `Ctrl+p` to keep them near the top and available across sessions
 
 ## 📋 Requirements
 
@@ -121,11 +122,11 @@ ZSM automatically generates meaningful session names:
 
 - **Simple**: `~/projects/webapp` → `webapp`
 - **Nested**: `~/projects/client/backend` → `client.backend`
-- **Conflicts**: Multiple "app" directories → `client.app`, `personal.app`
-- **Long names**: Intelligent abbreviation → `very-long-project-name` → `v-l-p-name`
+- **Conflicts**: Multiple "app" directories → `client.app`, `personal.app`. If base-path stripping or abbreviation still leaves a collision, ZSM adds a stable suffix derived from the original path.
+- **Long names**: Abbreviation and truncation keep generated names within the 29-byte session-name limit.
 - **Base Paths**: Configure base paths to strip from names (e.g., `/home/user` as base path)
   - `/home/user/projects/foo` → `projects.foo`
-  - `/home/user` → `/home/user` (exact matches keep full path)
+  - `/home/user` → `user` (exact matches preserve the path before naming)
 
 ### 3. Session Integration
 
@@ -135,7 +136,16 @@ ZSM automatically generates meaningful session names:
 - **Resurrectable sessions** (if enabled) are shown with a `↺` icon
 - **Auto-increment**: If session `webapp` exists, creates `webapp.2`, `webapp.3`, etc.
 
-Visit history is shared between ZSM instances in `$XDG_CACHE_HOME/zsm/session-usage` (default: `~/.cache/zsm/session-usage`). Tracking starts when you use this version; Zellij does not expose historical last-used times. Directories keep their zoxide ranking.
+Visit history is shared between ZSM instances in `$XDG_CACHE_HOME/zsm/session-usage` (default: `~/.cache/zsm/session-usage`). Each update compacts it to the latest visit per session and retains the 4,096 most recently visited session names. Existing history files are compacted automatically. Concurrent updates are serialized, and nanosecond timestamps retain their precision. Directories keep their zoxide ranking within the pinned and unpinned groups.
+
+ZSM records the chosen directory when creating a session, so its displayed folder remains correct even if naming configuration or the zoxide list changes. Sessions created before this tracking was added, or outside ZSM, show their name without a guessed folder. Leaving the name blank generates a random name in ZSM so its folder can also be recorded.
+
+### Pinned projects
+
+- Select a directory and press **`Ctrl+p`** to pin or unpin it. You can also pin a live session's recorded directory.
+- Pinned directories have a **`★`** marker and appear before other directories, including during search. Sessions retain their last-used ordering above directories.
+- Pins stay available if a directory is removed from zoxide. Unpinning removes that extra entry if zoxide no longer knows the directory.
+- Pins and session-directory associations are shared in `$XDG_STATE_HOME/zsm/projects` (default: `~/.local/state/zsm/projects`). ZSM reloads them when opened or when you press `Ctrl+r`. Unpin records are retained to prevent delayed responses from restoring old pins.
 
 ### 4. Quick Workflows
 
@@ -150,14 +160,16 @@ Visit history is shared between ZSM instances in `$XDG_CACHE_HOME/zsm/session-us
 1. Open ZSM  
 2. Navigate to directory
 3. Press `Enter` → Opens session creation (or `Ctrl+Enter` for default)
-4. Choose layout 
-5. Session is created in that directory
+4. Choose a layout; changes to the available layouts refresh the search while preserving the selected layout when possible
+5. The session is created in that directory after its folder record is saved
+
+A layout search with no matches cannot create a session: edit or clear the search first. `Ctrl+Enter` uses `default_layout`; an unavailable configured layout produces an error instead of silently falling back. Text fitting uses terminal columns and preserves combining marks and emoji sequences.
 
 ## 🔐 Permissions
 
 ZSM requires these Zellij permissions:
 
-- **RunCommands**: Execute zoxide queries and read/write shared session visit history
+- **RunCommands**: Execute zoxide queries and read/write shared visit history, pins, and session folders
 - **ReadApplicationState**: Read existing sessions and layouts
 - **ChangeApplicationState**: Create and switch sessions  
 - **MessageAndLaunchOtherPlugins**: Launch filepicker
@@ -175,6 +187,12 @@ ZSM requires these Zellij permissions:
 - Verify layout name matches exactly (case-sensitive)
 - Check available layouts in Zellij
 - Layout must exist in current session
+
+### Project or history storage errors?
+
+- Check that the configured XDG cache/state directories are writable.
+- Store operations use a portable directory lock and time out after about five seconds if another writer holds it. An error identifies the lock path; its `pid` file identifies the writer. If that process has stopped and left a lock behind, remove that lock directory before retrying.
+- Keep running ZSM instances on the same version when upgrading from the old append-only history format.
 
 ### Filepicker issues?
 

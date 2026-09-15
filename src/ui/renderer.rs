@@ -4,7 +4,8 @@ use zellij_tile::prelude::{
 
 use zsm::list::visible_range;
 use zsm::text::{
-    elide_middle, elide_start, remap_indices_after_elide_middle, remap_indices_after_elide_start,
+    display_width, elide_middle, elide_start, remap_indices_after_elide_middle,
+    remap_indices_after_elide_start, truncate_columns, wrap_columns,
 };
 
 use crate::session::SessionItem;
@@ -17,6 +18,9 @@ pub struct PluginRenderer;
 impl PluginRenderer {
     /// Render the main plugin interface
     pub fn render(state: &PluginState, rows: usize, cols: usize) {
+        if rows == 0 || cols == 0 {
+            return;
+        }
         let (x, y, width, height) = Self::calculate_main_size(rows, cols);
 
         match state.active_screen() {
@@ -41,11 +45,17 @@ impl PluginRenderer {
         let theme = Theme;
 
         // Render title
-        print_text_with_coordinates(theme.title("Zoxide Session Manager"), x, y, None, None);
+        print_text_with_coordinates(
+            theme.title(&truncate_columns("Zoxide Session Manager", width)),
+            x,
+            y,
+            Some(width),
+            Some(1),
+        );
 
         // Render search indication
-        let search_indication = theme.search_prompt(state.search_engine().search_term());
-        print_text_with_coordinates(search_indication, x, y + 2, None, None);
+        let search_indication = theme.search_prompt(state.search_engine().search_term(), width);
+        print_text_with_coordinates(search_indication, x, y + 2, Some(width), Some(1));
 
         // Render main content
         let table_rows = height.saturating_sub(6);
@@ -56,16 +66,28 @@ impl PluginRenderer {
         };
 
         if state.visible_item_count() == 0 && !state.search_engine().is_searching() {
-            let no_dirs_text = theme.warning(
-                "No zoxide directories found. Make sure zoxide is installed and you have visited some directories.",
-            );
-            print_text_with_coordinates(no_dirs_text, x, y + 4, None, None);
+            for (row, line) in wrap_columns(
+                "No project directories found. Visit directories with zoxide, then press Ctrl+r.",
+                width,
+            )
+            .iter()
+            .take(table_rows)
+            .enumerate()
+            {
+                print_text_with_coordinates(
+                    theme.warning(line),
+                    x,
+                    y + 4 + row,
+                    Some(width),
+                    Some(1),
+                );
+            }
         } else {
             print_table_with_coordinates(table, x, y + 4, Some(width), Some(table_rows));
         }
 
         // Render help text
-        Self::render_help_text(state, x, y + height.saturating_sub(1), theme);
+        Self::render_help_text(state, x, y + height.saturating_sub(1), width, theme);
     }
 
     /// Render new session creation screen
@@ -183,7 +205,7 @@ impl PluginRenderer {
         theme.highlight(text, adjusted_indices)
     }
 
-    /// Render a session item, shortened to `max_width` characters.
+    /// Render a session item, shortened to `max_width` terminal columns.
     ///
     /// Directories keep their tail (the project directory is the informative
     /// part); sessions keep both ends, since the name leads and the directory
@@ -212,7 +234,7 @@ impl PluginRenderer {
     }
 
     /// Render help text
-    fn render_help_text(state: &PluginState, x: usize, y: usize, theme: Theme) {
+    fn render_help_text(state: &PluginState, x: usize, y: usize, width: usize, theme: Theme) {
         // The empty list used to advertise "Type session name and press Enter",
         // which does nothing: typing searches, and Enter with no selection is
         // a no-op. Say what the keys actually do instead.
@@ -222,20 +244,30 @@ impl PluginRenderer {
             } else {
                 "Ctrl+r: reload directories • Esc: Exit"
             }
+        } else if width < 100 {
+            "Enter: Open • Ctrl+p: Pin/unpin • Esc: Back"
         } else {
             "↑/↓: Navigate • Enter: Switch/New • Ctrl+Enter: Quick create • Ctrl+p: Pin/unpin • Ctrl+r: Reload • Ctrl+d: Kill • Type: Search • Esc: Exit"
         };
 
-        print_text_with_coordinates(theme.help(help_text), x, y, None, None);
+        print_text_with_coordinates(
+            theme.help(&truncate_columns(help_text, width)),
+            x,
+            y,
+            Some(width),
+            Some(1),
+        );
     }
 
     /// Render error message
-    fn render_error(error: &str, x: usize, y: usize, _width: usize, height: usize) {
-        let dialog_y = y + height / 2;
-        print_text_with_coordinates(Theme.warning(error), x, dialog_y, None, None);
+    fn render_error(error: &str, x: usize, y: usize, width: usize, height: usize) {
+        let lines = wrap_columns(error, width);
+        let start = y + height.saturating_sub(lines.len()) / 2;
+        for (row, line) in lines.iter().take(height).enumerate() {
+            print_text_with_coordinates(Theme.warning(line), x, start + row, Some(width), Some(1));
+        }
     }
 
-    /// Render deletion confirmation dialog
     fn render_deletion_confirmation(
         state: &PluginState,
         session_name: &str,
@@ -244,44 +276,42 @@ impl PluginRenderer {
         width: usize,
         height: usize,
     ) {
-        let dialog_width = std::cmp::min(60, width.saturating_sub(4));
-        let dialog_height = 6;
-        let dialog_x = x + (width.saturating_sub(dialog_width)) / 2;
-        let dialog_y = y + (height.saturating_sub(dialog_height)) / 2;
-
-        let message = format!("Kill session '{}'?", session_name);
-        // Killing the session you are attached to disconnects you, which is
-        // worth saying out loud rather than leaving to the generic warning.
+        let dialog_width = width.min(64);
+        let inner = dialog_width.saturating_sub(2);
+        if inner == 0 {
+            return;
+        }
         let warning = if state.is_current_session(session_name) {
-            "This is the session you are in - killing it will disconnect you."
+            "This is your current session. Killing it will disconnect you."
         } else {
-            "If this is a resurrectable session, it will be deleted. This action cannot be undone."
+            "A live session will be killed; a resurrectable session will be deleted."
         };
-        let prompt = "Press 'y' to confirm, 'n' or Esc to cancel";
-
-        let dialog_lines = [
-            "┌".to_string() + &"─".repeat(dialog_width.saturating_sub(2)) + "┐",
+        let mut lines = vec![elide_middle(
+            &format!("Kill session '{session_name}'?"),
+            inner,
+        )];
+        lines.extend(wrap_columns(warning, inner));
+        lines.extend(wrap_columns("y: Confirm • n/Esc: Cancel", inner));
+        let dialog_x = x + width.saturating_sub(dialog_width) / 2;
+        let dialog_y = y + height.saturating_sub(lines.len() + 2) / 2;
+        let border = format!("+{}+", "-".repeat(inner));
+        let mut framed = vec![border.clone()];
+        framed.extend(lines.iter().map(|line| {
             format!(
-                "│{:^width$}│",
-                message,
-                width = dialog_width.saturating_sub(2)
-            ),
-            format!(
-                "│{:^width$}│",
-                warning,
-                width = dialog_width.saturating_sub(2)
-            ),
-            format!("│{:^width$}│", "", width = dialog_width.saturating_sub(2)),
-            format!(
-                "│{:^width$}│",
-                prompt,
-                width = dialog_width.saturating_sub(2)
-            ),
-            "└".to_string() + &"─".repeat(dialog_width.saturating_sub(2)) + "┘",
-        ];
-
-        for (i, line) in dialog_lines.iter().enumerate() {
-            print_text_with_coordinates(Theme.warning(line), dialog_x, dialog_y + i, None, None);
+                "|{}{}|",
+                line,
+                " ".repeat(inner.saturating_sub(display_width(line)))
+            )
+        }));
+        framed.push(border);
+        for (row, line) in framed.iter().take(height).enumerate() {
+            print_text_with_coordinates(
+                Theme.warning(line),
+                dialog_x,
+                dialog_y + row,
+                Some(dialog_width),
+                Some(1),
+            );
         }
     }
 
