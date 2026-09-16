@@ -1,3 +1,4 @@
+use crate::session::listing::SessionListing;
 use crate::session::types::SessionAction;
 use std::time::Duration;
 use zellij_tile::prelude::{delete_dead_session, kill_sessions, switch_session, SessionInfo};
@@ -12,12 +13,51 @@ pub struct SessionManager {
     pending_deletion: Option<String>,
     /// Resurrectable sessions
     resurrectable_sessions: Vec<(String, Duration)>,
+    listing: Option<SessionListing>,
 }
 
 impl SessionManager {
     /// Update the session list with new session information
-    pub fn update_sessions(&mut self, sessions: Vec<SessionInfo>) {
+    pub fn update_sessions(&mut self, mut sessions: Vec<SessionInfo>) {
+        // A metadata scan can omit even our own session. Keep its fresh event
+        // data (layouts in particular), and details for socket-confirmed peers.
+        for previous in &self.sessions {
+            let confirmed = previous.is_current_session
+                || self
+                    .listing
+                    .as_ref()
+                    .is_some_and(|list| list.live.iter().any(|(name, _)| name == &previous.name));
+            if confirmed && !sessions.iter().any(|s| s.name == previous.name) {
+                sessions.push(previous.clone());
+            }
+        }
         self.sessions = sessions;
+        self.reconcile_listing();
+    }
+
+    pub fn update_listing(&mut self, listing: SessionListing) {
+        self.listing = Some(listing);
+        self.reconcile_listing();
+    }
+
+    fn reconcile_listing(&mut self) {
+        let Some(listing) = &self.listing else { return };
+        self.sessions = listing
+            .live
+            .iter()
+            .map(|(name, is_current)| {
+                let mut session = self
+                    .sessions
+                    .iter()
+                    .find(|s| &s.name == name)
+                    .cloned()
+                    .unwrap_or_default();
+                session.name = name.clone();
+                session.is_current_session = *is_current;
+                session
+            })
+            .collect();
+        self.resurrectable_sessions = listing.resurrectable.clone();
     }
 
     /// Passive notifications use Zellij's peer cache. Only the current session
@@ -38,6 +78,7 @@ impl SessionManager {
         resurrectable_sessions: Vec<(String, Duration)>,
     ) {
         self.resurrectable_sessions = resurrectable_sessions;
+        self.reconcile_listing();
     }
 
     /// Get all sessions
@@ -63,10 +104,11 @@ impl SessionManager {
                 Ok(())
             }
             SessionAction::Kill(name) => {
-                if self
-                    .resurrectable_sessions
-                    .iter()
-                    .any(|(session_name, _)| session_name == &name)
+                if !self.sessions.iter().any(|session| session.name == name)
+                    && self
+                        .resurrectable_sessions
+                        .iter()
+                        .any(|(session_name, _)| session_name == &name)
                 {
                     // If the session is resurrectable, we should delete it
                     delete_dead_session(&name)

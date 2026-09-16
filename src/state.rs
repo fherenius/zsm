@@ -1,4 +1,5 @@
 use crate::session::creation::CreationRequest;
+use crate::session::listing::SessionListing;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use zellij_tile::prelude::*;
@@ -17,6 +18,11 @@ pub struct PluginState {
     pub(crate) permissions_granted: bool,
     pub(crate) is_visible: bool,
     pub(crate) refresh_timer_pending: bool,
+    pub(crate) session_listing_pending: bool,
+    pub(crate) plugin_id: Option<u32>,
+    pane_manifest: Option<PaneManifest>,
+    tabs: Option<Vec<TabInfo>>,
+    is_focused: bool,
     session_usage: SessionUsage,
     projects: Projects,
     projects_loaded: bool,
@@ -80,7 +86,7 @@ impl PluginState {
         }
     }
 
-    /// Apply a complete snapshot atomically, including removals.
+    /// Apply API metadata, retaining membership confirmed by the CLI listing.
     pub fn update_session_list(
         &mut self,
         sessions: Vec<SessionInfo>,
@@ -99,16 +105,73 @@ impl PluginState {
         self.rebuild_combined_items();
     }
 
+    pub fn update_session_listing(&mut self, output: &str) -> Result<(), String> {
+        let listing = SessionListing::parse(output)?;
+        self.session_manager.update_listing(listing);
+        let sessions = self.session_manager.sessions().to_vec();
+        self.update_current_session_info(&sessions);
+        self.rebuild_combined_items();
+        Ok(())
+    }
+
+    pub fn update_panes(&mut self, panes: PaneManifest) -> bool {
+        self.pane_manifest = Some(panes);
+        self.update_picker_activity()
+    }
+
+    pub fn update_tabs(&mut self, tabs: Vec<TabInfo>) -> bool {
+        self.tabs = Some(tabs);
+        self.update_picker_activity()
+    }
+
+    /// Restoring a suppressed plugin does not reliably emit Visible(true).
+    /// Pane/tab reports also cover refocusing and moving it to another tab.
+    fn update_picker_activity(&mut self) -> bool {
+        let (Some(plugin_id), Some(panes), Some(tabs)) =
+            (self.plugin_id, &self.pane_manifest, &self.tabs)
+        else {
+            return false;
+        };
+        let pane = panes.panes.iter().find_map(|(position, panes)| {
+            let pane = panes.iter().find(|p| p.is_plugin && p.id == plugin_id)?;
+            let tab = tabs.iter().find(|tab| tab.position == *position)?;
+            Some((pane, tab))
+        });
+        let visible = pane.is_some_and(|(pane, tab)| {
+            !pane.is_suppressed
+                && tab.active
+                && (!pane.is_floating || tab.are_floating_panes_visible)
+        });
+        let focused = visible
+            && pane.is_some_and(|(pane, tab)| {
+                pane.is_focused && (pane.is_floating || !tab.are_floating_panes_visible)
+            });
+        let opened = visible && (!self.is_visible || (focused && !self.is_focused));
+        self.set_visible(visible);
+        if opened {
+            self.reset_picker_search();
+        }
+        self.is_focused = focused;
+        opened
+    }
+
     /// Reset the picker on a visibility transition, preserving a filepicker's
     /// in-progress new-session form when focus returns from that plugin.
     pub fn set_visible(&mut self, visible: bool) {
-        if visible && !self.is_visible {
-            self.search_engine.clear();
-            self.selected_index = None;
-            self.error = None;
-            self.session_manager.cancel_deletion();
+        if !visible || !self.is_visible {
+            self.reset_picker_search();
+        }
+        if !visible {
+            self.is_focused = false;
         }
         self.is_visible = visible;
+    }
+
+    fn reset_picker_search(&mut self) {
+        self.search_engine.clear();
+        self.selected_index = None;
+        self.error = None;
+        self.session_manager.cancel_deletion();
     }
 
     pub fn update_session_usage(&mut self, history: &str) {
@@ -242,8 +305,8 @@ impl PluginState {
     }
 
     fn hide_picker(&mut self) {
-        // Mark this immediately, even if the host's Visible(false) notification
-        // is delayed, so the next open always starts with an empty search.
+        // Clear now: Zellij can restore a suppressed pane without sending any
+        // visibility event to the plugin being restored.
         self.set_visible(false);
         hide_self();
     }
@@ -831,6 +894,138 @@ mod tests {
             .collect()
     }
 
+    fn picker_panes(suppressed: bool, focused: bool) -> PaneManifest {
+        PaneManifest {
+            panes: std::collections::HashMap::from([(
+                0,
+                vec![PaneInfo {
+                    id: 7,
+                    is_plugin: true,
+                    is_floating: true,
+                    is_suppressed: suppressed,
+                    is_focused: focused,
+                    ..Default::default()
+                }],
+            )]),
+        }
+    }
+
+    fn picker_tab(active: bool, floating_visible: bool) -> Vec<TabInfo> {
+        vec![TabInfo {
+            position: 0,
+            active,
+            are_floating_panes_visible: floating_visible,
+            ..Default::default()
+        }]
+    }
+
+    #[test]
+    fn suppressed_picker_reopens_without_visible_events() {
+        let mut state = PluginState {
+            plugin_id: Some(7),
+            ..Default::default()
+        };
+        state.update_tabs(picker_tab(true, true));
+        assert!(state.update_panes(picker_panes(false, true)));
+        state.update_session_list(vec![session("alpha", true)], vec![]);
+        state
+            .search_engine
+            .update_search("alpha".into(), &state.combined_items);
+
+        // HideSelf suppresses the pane. LaunchOrFocusPlugin adds it back only
+        // after broadcasting visibility to the panes that were already there.
+        assert!(!state.update_panes(picker_panes(true, false)));
+        assert!(!state.is_visible);
+        assert_eq!(state.search_engine.search_term(), "");
+        assert!(state.update_panes(picker_panes(false, true)));
+        assert!(state.is_visible); // permits the refresh timer to run again
+        assert_eq!(state.search_engine.search_term(), "");
+    }
+
+    #[test]
+    fn picker_refocus_clears_search_but_repeated_pane_reports_do_not() {
+        let mut state = PluginState {
+            plugin_id: Some(7),
+            ..Default::default()
+        };
+        state.update_tabs(picker_tab(true, true));
+        state.update_panes(picker_panes(false, true));
+        state
+            .search_engine
+            .update_search("alpha".into(), &state.combined_items);
+        assert!(!state.update_panes(picker_panes(false, true)));
+        assert_eq!(state.search_engine.search_term(), "alpha");
+        assert!(!state.update_panes(picker_panes(false, false)));
+        assert!(state.update_panes(picker_panes(false, true)));
+        assert_eq!(state.search_engine.search_term(), "");
+    }
+
+    #[test]
+    fn hidden_floating_layer_and_inactive_tab_do_not_restart_polling() {
+        let mut state = PluginState {
+            plugin_id: Some(7),
+            ..Default::default()
+        };
+        state.update_panes(picker_panes(false, true));
+        assert!(!state.update_tabs(picker_tab(true, false)));
+        assert!(!state.is_visible);
+        assert!(!state.update_tabs(picker_tab(false, true)));
+        assert!(!state.is_visible);
+        assert!(state.update_tabs(picker_tab(true, true)));
+        assert!(state.is_visible);
+    }
+
+    #[test]
+    fn socket_listing_keeps_sessions_missing_metadata_and_removes_exited_peers() {
+        let mut state = PluginState::default();
+        state.config.show_resurrectable_sessions = true;
+        let mut current = session("current", true);
+        current.available_layouts = vec![LayoutInfo::BuiltIn("default".into())];
+        state.update_session_notification(vec![current]);
+        state
+            .update_session_listing("current [Created 2m ago] (current)\npeer [Created 1m ago]\n")
+            .unwrap();
+        assert_eq!(names(&state), ["current", "peer"]);
+        // The API can omit both live sessions or misclassify a peer as dead.
+        state.update_session_list(vec![], vec![("peer".into(), Duration::ZERO)]);
+        assert_eq!(names(&state), ["current", "peer"]);
+        assert!(state
+            .session_manager
+            .sessions()
+            .iter()
+            .all(|session| { session.name != "current" || !session.available_layouts.is_empty() }));
+        assert!(state.session_manager.resurrectable_sessions().is_empty());
+        state.update_session_listing(
+            "current [Created 2m ago] (current)\npeer [Created 1m ago] (EXITED - attach to resurrect)\n",
+        ).unwrap();
+        assert_eq!(state.session_manager.sessions().len(), 1);
+        assert!(state.combined_items.iter().any(
+            |item| matches!(item, SessionItem::ResurrectableSession { name, .. } if name == "peer")
+        ));
+        // A subsequent stale metadata snapshot must not resurrect the peer.
+        state.update_session_list(
+            vec![session("current", true), session("peer", false)],
+            vec![],
+        );
+        assert_eq!(state.session_manager.sessions().len(), 1);
+        state
+            .update_session_listing("current [Created 2m ago] (current)\n")
+            .unwrap();
+        assert_eq!(names(&state), ["current"]);
+    }
+
+    #[test]
+    fn malformed_cli_output_preserves_the_last_good_list() {
+        let mut state = PluginState::default();
+        state
+            .update_session_listing("current [Created 1s ago] (current)\npeer [Created 0s ago]\n")
+            .unwrap();
+        assert!(state
+            .update_session_listing("current [Created 1s ago] (current)\npartial row")
+            .is_err());
+        assert_eq!(names(&state), ["current", "peer"]);
+    }
+
     #[test]
     fn explicit_associations_survive_naming_changes_and_pins_survive_zoxide_removal() {
         let mut state = PluginState::default();
@@ -937,6 +1132,8 @@ mod tests {
         state.error = Some("old error".into());
         state.session_manager.start_deletion("alpha".into());
         state.set_visible(false);
+        // Search must already be gone even if no Visible(true) follows.
+        assert_eq!(state.search_engine.search_term(), "");
         state.set_visible(true);
         assert_eq!(state.search_engine.search_term(), "");
         assert!(!state.search_engine.is_searching());

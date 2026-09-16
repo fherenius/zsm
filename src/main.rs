@@ -14,6 +14,7 @@ register_plugin!(PluginState);
 impl ZellijPlugin for PluginState {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         self.initialize(configuration);
+        self.plugin_id = Some(get_plugin_ids().plugin_id);
 
         // Request permissions - same as session-manager
         request_permission(&[
@@ -26,6 +27,8 @@ impl ZellijPlugin for PluginState {
         subscribe(&[
             EventType::ModeUpdate,
             EventType::SessionUpdate,
+            EventType::PaneUpdate,
+            EventType::TabUpdate,
             EventType::Key,
             EventType::RunCommandResult,
             EventType::PermissionRequestResult,
@@ -57,9 +60,7 @@ impl ZellijPlugin for PluginState {
                         self.permissions_granted = true;
                         // Now that we have permissions, fetch zoxide directories
                         self.fetch_zoxide_directories();
-                        // Pull the full session list. The passive SessionUpdate event
-                        // only ever carries the current session until a plugin actively
-                        // requests the list (Zellij 0.44 API model), so we must pull it.
+                        // Pull metadata and socket-confirmed session membership.
                         self.fetch_sessions();
                         self.refresh_session_usage();
                         self.schedule_session_refresh();
@@ -80,6 +81,34 @@ impl ZellijPlugin for PluginState {
                 // replace its membership with the host's stale peer cache.
                 self.update_session_notification(session_infos);
                 should_render = true;
+            }
+            Event::PaneUpdate(panes) => {
+                if self.update_panes(panes) {
+                    self.refresh_picker();
+                    should_render = true;
+                }
+            }
+            Event::TabUpdate(tabs) => {
+                if self.update_tabs(tabs) {
+                    self.refresh_picker();
+                    should_render = true;
+                }
+            }
+            Event::RunCommandResult(exit_code, stdout, stderr, context)
+                if context.contains_key("session_listing") =>
+            {
+                self.session_listing_pending = false;
+                if exit_code == Some(0) {
+                    match self.update_session_listing(&String::from_utf8_lossy(&stdout)) {
+                        Ok(()) => should_render = true,
+                        Err(error) => eprintln!("[zsm] session listing failed: {error}"),
+                    }
+                } else {
+                    eprintln!(
+                        "[zsm] session listing failed: {}",
+                        String::from_utf8_lossy(&stderr)
+                    );
+                }
             }
             Event::RunCommandResult(exit_code, stdout, stderr, context)
                 if context.contains_key("zoxide_query") =>
@@ -127,10 +156,7 @@ impl ZellijPlugin for PluginState {
                 // reflects directories visited since it was last shown, and re-pull
                 // the session list (it may have changed while we were hidden).
                 if visible {
-                    self.fetch_zoxide_directories();
-                    self.fetch_sessions();
-                    self.refresh_session_usage();
-                    self.schedule_session_refresh();
+                    self.refresh_picker();
                     should_render = true;
                 }
             }
@@ -184,6 +210,13 @@ impl ZellijPlugin for PluginState {
 }
 
 impl PluginState {
+    fn refresh_picker(&mut self) {
+        self.fetch_zoxide_directories();
+        self.fetch_sessions();
+        self.refresh_session_usage();
+        self.schedule_session_refresh();
+    }
+
     fn fetch_zoxide_directories(&mut self) {
         if !self.permissions_granted {
             return;
@@ -193,7 +226,7 @@ impl PluginState {
         run_command(&["zoxide", "query", "-l", "-s"], context);
     }
 
-    /// Pull membership explicitly; passive events can carry stale peer caches.
+    /// Pull metadata from the API and membership from the CLI's socket probes.
     fn fetch_sessions(&mut self) {
         if !self.permissions_granted {
             return;
@@ -205,6 +238,13 @@ impl PluginState {
             Err(e) => {
                 eprintln!("[zsm] get_session_list failed: {}", e);
             }
+        }
+        if !self.session_listing_pending {
+            self.session_listing_pending = true;
+            run_command(
+                &["zellij", "list-sessions", "--no-formatting"],
+                BTreeMap::from([("session_listing".into(), "true".into())]),
+            );
         }
     }
 

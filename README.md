@@ -132,7 +132,7 @@ ZSM automatically generates meaningful session names:
 
 - **Existing sessions** are shown with indicators: `● current` or `○ available`
 - **Last-used order**: Sessions you visit through ZSM appear most recent first, including while searching. Opening the picker records the current session and starts with an empty search. Sessions without recorded visits sort by name.
-- **Fresh session list**: ZSM refreshes sessions when opened and every second while visible, including sessions whose directories are absent from zoxide.
+- **Fresh session list**: ZSM refreshes sessions when opened or refocused and every second while visible. It checks `zellij list-sessions` as well as the metadata API, so running sessions remain available even when their metadata is missing or unreadable. Reopening a hidden picker clears the previous search, including when Zellij restores it without a visibility event.
 - **Resurrectable sessions** (if enabled) are shown with a `↺` icon
 - **Auto-increment**: If session `webapp` exists, creates `webapp.2`, `webapp.3`, etc.
 
@@ -169,7 +169,7 @@ A layout search with no matches cannot create a session: edit or clear the searc
 
 ZSM requires these Zellij permissions:
 
-- **RunCommands**: Execute zoxide queries and read/write shared visit history, pins, and session folders
+- **RunCommands**: Execute zoxide queries, list Zellij sessions, and read/write shared visit history, pins, and session folders
 - **ReadApplicationState**: Read existing sessions and layouts
 - **ChangeApplicationState**: Create and switch sessions  
 - **MessageAndLaunchOtherPlugins**: Launch filepicker
